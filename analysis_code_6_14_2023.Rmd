@@ -1,0 +1,2716 @@
+---
+title: "NHANES: Telomere length analysis codes"
+author: "Hanish Kodali"
+date: "9/30/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr) #for data manipulation
+library(tidyverse) #to manipulate the data
+library(haven) #to import and export sas and spss files
+library(readxl) #to read excel data
+library(survey) #survey package
+library(srvyr) # dplyr for survey package
+library(jskm) # for the graphs
+library(tableone)
+library(sjPlot)
+library(gtsummary)
+```
+#https://cran.r-project.org/web/packages/nhanesA/vignettes/Introducing_nhanesA.html
+
+#https://cran.r-project.org/web/packages/NHANES/NHANES.pdf
+
+#https://cran.r-project.org/web/packages/survey/vignettes/survey.pdf
+
+#https://faculty.washington.edu/tlumley/survey-jsm-nup.pdf
+
+#https://stats.idre.ucla.edu/r/seminars/survey-data-analysis-with-r/
+
+#https://stats.idre.ucla.edu/r/faq/how-do-i-analyze-survey-data-with-a-stratified-design-with-certainty-psus/
+
+#https://stats.idre.ucla.edu/r/seminars/survey-data-analysis-with-r/
+
+#http://r-survey.r-forge.r-project.org/survey/index.html
+
+#https://cran.r-project.org/web/packages/srvyr/vignettes/srvyr-vs-survey.html
+
+#pir categories- file- https://wwwn.cdc.gov/nchs/nhanes/2013-2014/inq_h.htm
+
+#for crosstab- http://rstudio-pubs-static.s3.amazonaws.com/6975_c4943349b6174f448104a5513fed59a9.html
+
+#https://cran.r-project.org/web/packages/pollster/readme/README.html
+
+```{r crude data, echo=FALSE}
+analysis_data <- haven::read_xpt("C:/Users/kodalh01/Dropbox (Health)/Classes/Kodali's Dissertation/Dissertation/Dataset/final_data_1999_2002_2019.xpt") %>% 
+  mutate(telomere_kb = (3274 + (2413 * TELOMEAN)) /1000,
+         mortstat = case_when(mortstat == 1 ~ 1, #dead
+                              mortstat == 0 ~ 2), #alive
+         RIAGENDR = case_when(RIAGENDR == 1 ~ 1, #male
+                              RIAGENDR == 2 ~ 2), #female
+         RIDRETH2 = case_when(RIDRETH2 == 1 ~ 1, #white
+                              RIDRETH2 == 2 ~ 2, #black
+                              RIDRETH2 == 3 ~ 3, #mexican
+                              RIDRETH2 == 4 ~ 4, #Other Race
+                              RIDRETH2 == 5 ~ 5), #Other Hispanic
+         smoking_status= case_when(SMQ020 == 2 ~ 1, #never
+                                   SMQ020 == 1 & SMQ040 == 3 ~ 2, #former
+                                   SMQ020 == 1 & SMQ040 == 1 ~ 3, #current
+                                   SMQ020 == 1 & SMQ040 == 2 ~ 3),#current
+         cvd_status = case_when(MCQ160C == 1|MCQ160E == 1|MCQ160F == 1 ~ 1, #have CVD 
+                                MCQ160C == 2|MCQ160E == 2|MCQ160F == 2 ~ 2),
+         htn_status = case_when(BPQ020 == 1|BPQ050A ==1|BPXSAR >= 140|BPXDAR >= 90 ~ 1, #have htn 
+                                BPQ020 == 2|BPQ050A ==2|BPXSAR < 140|BPXDAR < 90 ~ 2),
+         chol_status = case_when(BPQ080==1|BPQ090D==1|LBXTC >= 240 ~ 1, #high cholesterol
+                                 BPQ080==2|BPQ090D==2|LBXTC < 240 ~ 2),
+         diab_status = case_when(DIQ010 == 1|DIQ050 == 1|DIQ070 == 1|LBXGH >= 5.7 ~ 1, #have diabetes
+                                 DIQ010 == 2|DIQ050 == 2|DIQ070 == 2|LBXGH < 5.7 ~ 2),
+         bmi_cat = cut(BMXBMI, breaks = c(-Inf, 18.5, 24.9, 29.9, Inf), labels = c(0, 1, 2, 3)),
+         age_grp = cut(RIDAGEYR, breaks = c(-Inf, 44, 64, Inf), labels = c(1, 2, 3)), #young, middle, old, senior
+         age_sq = RIDAGEYR * RIDAGEYR,
+         edu_cat_3 = case_when(DMDEDUC2 %in% 1:2 ~ 1, #less than high school
+                               DMDEDUC2 == 3 ~ 2, #high school
+                               DMDEDUC2 == 4 ~ 3, #some college
+                               DMDEDUC2 == 5 ~ 4), #college
+         INDFMPIR = if_else(is.na(INDFMPIR), 9, INDFMPIR),
+         pir_cat = cut(INDFMPIR, breaks = c(-Inf, 1.29, 1.85, 5, Inf),labels = c(1,2,3,4)), #poor, middle, rich, missing
+         data_status_demo = case_when(!is.na(TELOMEAN) & eligstat ==1 &  mortstat <= 2 &  RIDAGEYR >= 25 &  RIAGENDR <= 2 &  RIDRETH2 <= 3 &  DMDEDUC2 <= 5 ~ 1),
+         data_status_demo = if_else(is.na(data_status_demo), 2, data_status_demo),
+         data_status_all = case_when(!is.na(TELOMEAN) & eligstat ==1 &  mortstat <= 2 &  RIDAGEYR >= 25 &  RIAGENDR <= 2 &  RIDRETH2 <= 3 &  DMDEDUC2 <= 5 &  !is.na(smoking_status) & !is.na(cvd_status) &  !is.na(htn_status) &  !is.na(chol_status) &  !is.na(diab_status) ~ 1),
+         data_status_all = if_else(is.na(data_status_all), 2, data_status_all),
+         cvd_death = case_when(ucod_leading == 1|ucod_leading == 5 & mortstat == 1 ~ 1), #heart and stroke
+         cvd_death = if_else(is.na(cvd_death), 2, 1), 
+         cancer_death = case_when(ucod_leading == 2 & mortstat == 1 ~ 1),  #cancer
+         cancer_death = if_else(is.na(cancer_death), 2 , 1),
+         permth_int_yr = permth_int/12) %>% 
+    select(SEQN, RIDAGEYR, age_grp, age_sq, RIAGENDR, RIDRETH2, edu_cat_3, pir_cat, INDFMPIR, smoking_status, htn_status, cvd_status, diab_status, chol_status, TELOMEAN, telomere_kb, TELOSTD, mortstat, permth_int, permth_int_yr, permth_exm, ucod_leading, diabetes, hyperten, SDMVSTRA, SDMVPSU, WTSAF4YR, WTMEC4YR, WTINT4YR, eligstat, data_status_demo, data_status_all, cvd_death, cancer_death, SMQ020, SMQ040, MCQ160C, MCQ160E , MCQ160F, BPQ020, BPQ050A, BPXSAR, BPXDAR, BPQ080, BPQ090D, LBXTC, DIQ010, DIQ050, DIQ070, LBXGH) 
+
+
+analysis_data_count <- analysis_data %>% 
+  filter(!is.na(telomere_kb)) %>% 
+  filter(!is.na(eligstat)) %>%
+  filter(!is.na(mortstat)) %>% 
+  filter(RIDAGEYR>=25) %>%
+  filter(RIAGENDR <= 2) %>% 
+  filter(RIDRETH2 <= 3) %>% 
+  filter(edu_cat_3 <= 5) %>% 
+  filter(!is.na(pir_cat)) %>% 
+  filter(!is.na(smoking_status)) %>% 
+  filter(!is.na(chol_status)) %>% 
+  filter(!is.na(htn_status)) %>% 
+  filter(!is.na(cvd_status))
+
+analysis_data_2 <- analysis_data %>% 
+  filter(data_status_demo == 1) %>% 
+  mutate(telomere_kb_inv = 1/telomere_kb,
+         telomere_kb_rec = telomere_kb * (-1),
+         telomere_quartile = ntile(TELOMEAN, 4), 
+         telomere_kb_quartile = ntile(telomere_kb, 4))%>% 
+  right_join(analysis_data)
+
+#haven::write_sav(analysis_data_2, "Final_analysis_data.sav")
+```
+
+```{r compare missing and with TL, echo=FALSE}
+tbl_summary_check <- analysis_data_2 %>%
+  mutate(tl_missing = if_else(is.na(telomere_kb), 1, 0)) %>%
+    tbl_summary(
+    statistic = list(all_categorical() ~ "{n} ({p}%)", 
+                     all_continuous() ~ "{mean}  ({sd})"), 
+    by = "tl_missing", 
+    include = c(age_grp, RIAGENDR, RIDRETH2, edu_cat_3, smoking_status, htn_status, diab_status, chol_status, cvd_status, mortstat, cvd_death, cancer_death),
+    missing_text = "Missing", 
+    digits = all_categorical() ~ list(c(2, 2))) %>% 
+  add_p() %>% 
+  add_overall()
+
+tbl_summary_check
+
+tbl_svysummary_check <- analysis_data_2 %>%
+  mutate(tl_missing = if_else(is.na(telomere_kb), 1, 0)) %>%
+  survey::svydesign(id = ~SDMVPSU, weights = ~WTMEC4YR, strata = ~SDMVSTRA, nest = TRUE, data = .) %>%
+    tbl_svysummary(
+    statistic = list(all_categorical() ~ "{p} ({p.std.error})", 
+                     all_continuous() ~ "{mean} ({mean.std.error})"), 
+    by = "tl_missing", 
+    include = c(age_grp, RIAGENDR, RIDRETH2, edu_cat_3, smoking_status, htn_status, diab_status, chol_status, cvd_status, mortstat, cvd_death, cancer_death),
+    missing_text = "Missing", 
+    digits = all_categorical() ~ list(c(2, 2))) %>% 
+  add_difference() %>% 
+  add_overall()
+
+tbl_svysummary_check
+```
+
+```{r survey design, echo=FALSE}
+srs_design_srvyr_demo <- analysis_data_2 %>% 
+  as_survey_design(id = SDMVPSU, strata = SDMVSTRA, weights = WTMEC4YR, nest = TRUE) %>% 
+  filter(data_status_demo == 1) %>% 
+  mutate(sex_telomere = as.numeric(RIAGENDR) * as.numeric(telomere_kb_quartile),
+         race_telomere = as.numeric(RIDRETH2) * as.numeric(telomere_kb_quartile),
+         educ_telomere = as.numeric(edu_cat_3) * as.numeric(telomere_kb_quartile),
+         age_grp_race = as.numeric(age_grp)* as.numeric(RIDRETH2),
+         age_grp_telomere = as.numeric(age_grp) * as.numeric(telomere_kb_quartile),
+         age_grp_race_telomere = as.numeric(age_grp) * as.numeric(telomere_kb_quartile)* as.numeric(RIDRETH2))
+
+srs_design_srvyr_all <- analysis_data_2 %>% 
+  as_survey_design(id = SDMVPSU, strata = SDMVSTRA, weights = WTMEC4YR, nest = TRUE) %>% 
+  filter(data_status_all == 1) %>% 
+  mutate(sex_telomere = as.numeric(RIAGENDR) * as.numeric(telomere_kb_quartile),
+         race_telomere = as.numeric(RIDRETH2) * as.numeric(telomere_kb_quartile),
+         educ_telomere = as.numeric(edu_cat_3) * as.numeric(telomere_kb_quartile),
+         age_grp_race = as.numeric(age_grp)* as.numeric(RIDRETH2),
+         age_grp_telomere = as.numeric(age_grp) * as.numeric(telomere_kb_quartile),
+         age_grp_race_telomere = as.numeric(age_grp) * as.numeric(telomere_kb_quartile)* as.numeric(RIDRETH2))
+
+srs_design_srvyr_all_1_1 <- analysis_data_2 %>% 
+  as_survey_design(id = SDMVPSU, strata = SDMVSTRA, weights = WTMEC4YR, nest = TRUE) %>% 
+  filter(data_status_all == 1 & age_grp == 1 & RIDRETH2 ==1) %>% 
+  mutate(sex_telomere = as.numeric(RIAGENDR) * as.numeric(telomere_kb_quartile),
+         race_telomere = as.numeric(RIDRETH2) * as.numeric(telomere_kb_quartile),
+         educ_telomere = as.numeric(edu_cat_3) * as.numeric(telomere_kb_quartile),
+         age_grp_race = as.numeric(age_grp)* as.numeric(RIDRETH2),
+         age_grp_telomere = as.numeric(age_grp) * as.numeric(telomere_kb_quartile),
+         age_grp_race_telomere = as.numeric(age_grp) * as.numeric(telomere_kb_quartile)* as.numeric(RIDRETH2))
+
+srs_design_srvyr_all_1_2 <- analysis_data_2 %>% 
+  as_survey_design(id = SDMVPSU, strata = SDMVSTRA, weights = WTMEC4YR, nest = TRUE) %>% 
+  filter(data_status_all == 1 & age_grp == 1 & RIDRETH2 ==2) %>% 
+  mutate(sex_telomere = as.numeric(RIAGENDR) * as.numeric(telomere_kb_quartile),
+         race_telomere = as.numeric(RIDRETH2) * as.numeric(telomere_kb_quartile),
+         educ_telomere = as.numeric(edu_cat_3) * as.numeric(telomere_kb_quartile),
+         age_grp_race = as.numeric(age_grp)* as.numeric(RIDRETH2),
+         age_grp_telomere = as.numeric(age_grp) * as.numeric(telomere_kb_quartile),
+         age_grp_race_telomere = as.numeric(age_grp) * as.numeric(telomere_kb_quartile)* as.numeric(RIDRETH2))
+
+srs_design_srvyr_all_1_3 <- analysis_data_2 %>% 
+  as_survey_design(id = SDMVPSU, strata = SDMVSTRA, weights = WTMEC4YR, nest = TRUE) %>% 
+  filter(data_status_all == 1 & age_grp == 1 & RIDRETH2 ==3) %>% 
+  mutate(sex_telomere = as.numeric(RIAGENDR) * as.numeric(telomere_kb_quartile),
+         race_telomere = as.numeric(RIDRETH2) * as.numeric(telomere_kb_quartile),
+         educ_telomere = as.numeric(edu_cat_3) * as.numeric(telomere_kb_quartile),
+         age_grp_race = as.numeric(age_grp)* as.numeric(RIDRETH2),
+         age_grp_telomere = as.numeric(age_grp) * as.numeric(telomere_kb_quartile),
+         age_grp_race_telomere = as.numeric(age_grp) * as.numeric(telomere_kb_quartile)* as.numeric(RIDRETH2))
+
+srs_design_srvyr_all_2_1 <- analysis_data_2 %>% 
+  as_survey_design(id = SDMVPSU, strata = SDMVSTRA, weights = WTMEC4YR, nest = TRUE) %>% 
+  filter(data_status_all == 1 & age_grp == 2 & RIDRETH2 ==1) %>% 
+  mutate(sex_telomere = as.numeric(RIAGENDR) * as.numeric(telomere_kb_quartile),
+         race_telomere = as.numeric(RIDRETH2) * as.numeric(telomere_kb_quartile),
+         educ_telomere = as.numeric(edu_cat_3) * as.numeric(telomere_kb_quartile),
+         age_grp_race = as.numeric(age_grp)* as.numeric(RIDRETH2),
+         age_grp_telomere = as.numeric(age_grp) * as.numeric(telomere_kb_quartile),
+         age_grp_race_telomere = as.numeric(age_grp) * as.numeric(telomere_kb_quartile)* as.numeric(RIDRETH2))
+
+
+srs_design_srvyr_all_2_2 <- analysis_data_2 %>% 
+  as_survey_design(id = SDMVPSU, strata = SDMVSTRA, weights = WTMEC4YR, nest = TRUE) %>% 
+  filter(data_status_all == 1 & age_grp == 2 & RIDRETH2 ==2) %>% 
+  mutate(sex_telomere = as.numeric(RIAGENDR) * as.numeric(telomere_kb_quartile),
+         race_telomere = as.numeric(RIDRETH2) * as.numeric(telomere_kb_quartile),
+         educ_telomere = as.numeric(edu_cat_3) * as.numeric(telomere_kb_quartile),
+         age_grp_race = as.numeric(age_grp)* as.numeric(RIDRETH2),
+         age_grp_telomere = as.numeric(age_grp) * as.numeric(telomere_kb_quartile),
+         age_grp_race_telomere = as.numeric(age_grp) * as.numeric(telomere_kb_quartile)* as.numeric(RIDRETH2))
+
+srs_design_srvyr_all_2_3 <- analysis_data_2 %>% 
+  as_survey_design(id = SDMVPSU, strata = SDMVSTRA, weights = WTMEC4YR, nest = TRUE) %>% 
+  filter(data_status_all == 1 & age_grp == 2 & RIDRETH2 ==3) %>% 
+  mutate(sex_telomere = as.numeric(RIAGENDR) * as.numeric(telomere_kb_quartile),
+         race_telomere = as.numeric(RIDRETH2) * as.numeric(telomere_kb_quartile),
+         educ_telomere = as.numeric(edu_cat_3) * as.numeric(telomere_kb_quartile),
+         age_grp_race = as.numeric(age_grp)* as.numeric(RIDRETH2),
+         age_grp_telomere = as.numeric(age_grp) * as.numeric(telomere_kb_quartile),
+         age_grp_race_telomere = as.numeric(age_grp) * as.numeric(telomere_kb_quartile)* as.numeric(RIDRETH2))
+
+srs_design_srvyr_all_3_1 <- analysis_data_2 %>% 
+  as_survey_design(id = SDMVPSU, strata = SDMVSTRA, weights = WTMEC4YR, nest = TRUE) %>% 
+  filter(data_status_all == 1 & age_grp == 3 & RIDRETH2 ==1) %>% 
+  mutate(sex_telomere = as.numeric(RIAGENDR) * as.numeric(telomere_kb_quartile),
+         race_telomere = as.numeric(RIDRETH2) * as.numeric(telomere_kb_quartile),
+         educ_telomere = as.numeric(edu_cat_3) * as.numeric(telomere_kb_quartile),
+         age_grp_race = as.numeric(age_grp)* as.numeric(RIDRETH2),
+         age_grp_telomere = as.numeric(age_grp) * as.numeric(telomere_kb_quartile),
+         age_grp_race_telomere = as.numeric(age_grp) * as.numeric(telomere_kb_quartile)* as.numeric(RIDRETH2))
+
+srs_design_srvyr_all_3_2 <- analysis_data_2 %>% 
+  as_survey_design(id = SDMVPSU, strata = SDMVSTRA, weights = WTMEC4YR, nest = TRUE) %>% 
+  filter(data_status_all == 1 & age_grp == 3 & RIDRETH2 ==2) %>% 
+  mutate(sex_telomere = as.numeric(RIAGENDR) * as.numeric(telomere_kb_quartile),
+         race_telomere = as.numeric(RIDRETH2) * as.numeric(telomere_kb_quartile),
+         educ_telomere = as.numeric(edu_cat_3) * as.numeric(telomere_kb_quartile),
+         age_grp_race = as.numeric(age_grp)* as.numeric(RIDRETH2),
+         age_grp_telomere = as.numeric(age_grp) * as.numeric(telomere_kb_quartile),
+         age_grp_race_telomere = as.numeric(age_grp) * as.numeric(telomere_kb_quartile)* as.numeric(RIDRETH2))
+
+srs_design_srvyr_all_3_3 <- analysis_data_2 %>% 
+  as_survey_design(id = SDMVPSU, strata = SDMVSTRA, weights = WTMEC4YR, nest = TRUE) %>% 
+  filter(data_status_all == 1 & age_grp == 3 & RIDRETH2 ==3) %>% 
+  mutate(sex_telomere = as.numeric(RIAGENDR) * as.numeric(telomere_kb_quartile),
+         race_telomere = as.numeric(RIDRETH2) * as.numeric(telomere_kb_quartile),
+         educ_telomere = as.numeric(edu_cat_3) * as.numeric(telomere_kb_quartile),
+         age_grp_race = as.numeric(age_grp)* as.numeric(RIDRETH2),
+         age_grp_telomere = as.numeric(age_grp) * as.numeric(telomere_kb_quartile),
+         age_grp_race_telomere = as.numeric(age_grp) * as.numeric(telomere_kb_quartile)* as.numeric(RIDRETH2))
+
+#summary(srs_design_srvyr$variables)
+```
+
+```{r summary tables, echo= FALSE}
+
+summary_mortality <- srs_design_srvyr_demo %>% 
+  summarise(overall_mean= srvyr::survey_mean(telomere_kb),
+            death = survey_mean(mortstat == 1),
+            alive = survey_mean(mortstat == 2))
+
+summary_mortality
+
+summary_data_overall <- srs_design_srvyr_demo %>%  
+  srvyr::group_by(mortstat) %>% 
+  summarize(tel_kb = srvyr::survey_mean(telomere_kb, na.rm = TRUE),
+            Young = survey_mean(age_grp == 1, na.rm = TRUE), 
+            Middle = survey_mean(age_grp == 2, na.rm = TRUE),
+            Old = survey_mean(age_grp == 3, na.rm = TRUE),
+            Female = survey_mean(RIAGENDR == 1, na.rm = TRUE),
+            Male = survey_mean(RIAGENDR == 2, na.rm = TRUE), 
+            White = survey_mean(RIDRETH2 == 1, na.rm = TRUE), 
+            Afro_American = survey_mean(RIDRETH2 == 2, na.rm = TRUE), 
+            Mexican_hispanic = survey_mean(RIDRETH2 == 3, na.rm = TRUE),
+            Less_than_high_school = survey_mean(edu_cat_3 == 1, na.rm = TRUE),
+            high_school = survey_mean(edu_cat_3 == 2, na.rm = TRUE),
+            Some_college = survey_mean(edu_cat_3 == 3, na.rm = TRUE),
+            College = survey_mean(edu_cat_3 == 4, na.rm = TRUE),
+            Poor	=	survey_mean(pir_cat	==	1, na.rm = TRUE), 
+            Mid	=	survey_mean(pir_cat	==	2, na.rm = TRUE), 
+            Rich	=	survey_mean(pir_cat	==	3, na.rm = TRUE),
+            inc_missing	=	survey_mean(pir_cat	==	4, na.rm = TRUE),
+            Never	=	survey_mean(smoking_status ==	1, na.rm = TRUE),
+            Former	=	survey_mean(smoking_status	==	2, na.rm = TRUE),
+            Current	=	survey_mean(smoking_status	==	3, na.rm = TRUE),
+            htn_status_Yes	=	survey_mean(htn_status	==	1, na.rm = TRUE),
+            htn_status_No	=	survey_mean(htn_status	==	2, na.rm = TRUE),
+            cvd_status_Yes	=	survey_mean(cvd_status	==	1, na.rm = TRUE),
+            cvd_status_No	=	survey_mean(cvd_status	==	2, na.rm = TRUE),
+            diab_status_Yes	=	survey_mean(diab_status	==	1, na.rm = TRUE),
+            diab_status_No	=	survey_mean(diab_status	==	2, na.rm = TRUE),
+            chol_status_Yes	=	survey_mean(chol_status	==	1, na.rm = TRUE),
+            chol_status_No	=	survey_mean(chol_status	==	2, na.rm = TRUE),
+            cvd_death_Yes	=	survey_mean(cvd_death	==	1, na.rm = TRUE),
+            cvd_death_No	=	survey_mean(cvd_death	==	2, na.rm = TRUE),
+            cancer_death_Yes	=	survey_mean(cancer_death	==	1, na.rm = TRUE),
+            cancer_death_No	=	survey_mean(cancer_death	==	2, na.rm = TRUE)) 
+
+summary_data_overall
+
+#write.csv(summary_data_overall, "table_1_6_9_23.csv", na = "")
+
+summary_data_age_grp <- srs_design_srvyr_demo %>% 
+  srvyr::select(SEQN, TELOMEAN,telomere_kb, age_grp) %>%
+  srvyr::mutate(age_grp = as.factor(age_grp)) %>% 
+  srvyr::group_by(age_grp) %>% 
+  summarize(n= n(),
+            tel_kb = mean(telomere_kb),
+            tel_kb_se = sd(telomere_kb) / sqrt((length(telomere_kb))),
+            tel_ori = mean(TELOMEAN),
+            tel_ori_se = sd(TELOMEAN) / sqrt((length(TELOMEAN))))
+
+summary_data_age_grp
+
+summary_data_sex <- srs_design_srvyr_demo$variables %>% 
+  select(SEQN, TELOMEAN,telomere_kb, RIAGENDR)%>% 
+  group_by(RIAGENDR) %>% 
+  summarise(n= n(),
+            tel_kb = mean(telomere_kb),
+            tel_kb_se = sd(telomere_kb) / sqrt((length(telomere_kb))),
+            tel_ori = mean(TELOMEAN),
+            tel_ori_se = sd(TELOMEAN) / sqrt((length(TELOMEAN))))
+
+summary_data_sex
+
+
+summary_data_race <-  srs_design_srvyr_demo$variables %>% 
+  select(SEQN, TELOMEAN,telomere_kb, RIDRETH2)%>% 
+  group_by(RIDRETH2) %>% 
+  summarise(n= n(),
+            tel_kb = mean(telomere_kb),
+            tel_kb_se = sd(telomere_kb) / sqrt((length(telomere_kb))),
+            tel_ori = mean(TELOMEAN),
+            tel_ori_se = sd(TELOMEAN) / sqrt((length(TELOMEAN))))
+
+summary_data_race
+
+summary_data_edu_cat_3 <- srs_design_srvyr_demo$variables %>% 
+  select(SEQN, TELOMEAN,telomere_kb, edu_cat_3)%>% 
+  group_by(edu_cat_3) %>% 
+  summarise(n= n(),
+            tel_kb = mean(telomere_kb),
+            tel_kb_se = sd(telomere_kb) / sqrt((length(telomere_kb))),
+            tel_ori = mean(TELOMEAN),
+            tel_ori_se = sd(TELOMEAN) / sqrt((length(TELOMEAN))))
+
+summary_data_edu_cat_3
+
+summary_data_pir_cat <- srs_design_srvyr_demo$variables %>% 
+  select(SEQN, TELOMEAN,telomere_kb, pir_cat)%>% 
+  group_by(pir_cat) %>% 
+  summarise(n= n(),
+            tel_kb = mean(telomere_kb),
+            tel_kb_se = sd(telomere_kb) / sqrt((length(telomere_kb))),
+            tel_ori = mean(TELOMEAN),
+            tel_ori_se = sd(TELOMEAN) / sqrt((length(TELOMEAN))))
+
+summary_data_pir_cat
+
+summary_data_smoking_status <- srs_design_srvyr_demo$variables %>% 
+  select(SEQN, TELOMEAN,telomere_kb, smoking_status)%>% 
+  group_by(smoking_status) %>% 
+  summarise(n= n(),
+            tel_kb = mean(telomere_kb),
+            tel_kb_se = sd(telomere_kb) / sqrt((length(telomere_kb))),
+            tel_ori = mean(TELOMEAN),
+            tel_ori_se = sd(TELOMEAN) / sqrt((length(TELOMEAN))))
+
+summary_data_smoking_status
+
+summary_data_htn_status <- srs_design_srvyr_demo$variables %>% 
+  select(SEQN, TELOMEAN,telomere_kb, htn_status)%>% 
+  group_by(htn_status) %>% 
+  summarise(n= n(),
+            tel_kb = mean(telomere_kb),
+            tel_kb_se = sd(telomere_kb) / sqrt((length(telomere_kb))),
+            tel_ori = mean(TELOMEAN),
+            tel_ori_se = sd(TELOMEAN) / sqrt((length(TELOMEAN))))
+
+summary_data_htn_status
+
+summary_data_diab_status <- srs_design_srvyr_demo$variables %>% 
+  select(SEQN, TELOMEAN,telomere_kb, diab_status)%>% 
+  group_by(diab_status) %>% 
+  summarise(n= n(),
+            tel_kb = mean(telomere_kb),
+            tel_kb_se = sd(telomere_kb) / sqrt((length(telomere_kb))),
+            tel_ori = mean(TELOMEAN),
+            tel_ori_se = sd(TELOMEAN) / sqrt((length(TELOMEAN))))
+
+summary_data_diab_status
+
+summary_data_chol_status <- srs_design_srvyr_demo$variables %>% 
+  select(SEQN, TELOMEAN,telomere_kb, chol_status)%>% 
+  group_by(chol_status) %>% 
+  summarise(n= n(),
+            tel_kb = mean(telomere_kb),
+            tel_kb_se = sd(telomere_kb) / sqrt((length(telomere_kb))),
+            tel_ori = mean(TELOMEAN),
+            tel_ori_se = sd(TELOMEAN) / sqrt((length(TELOMEAN))))
+
+summary_data_chol_status
+
+summary_data_cvd_status <- srs_design_srvyr_demo$variables %>% 
+  select(SEQN, TELOMEAN,telomere_kb, cvd_status)%>% 
+  group_by(cvd_status) %>% 
+  summarise(n= n(),
+            tel_kb = mean(telomere_kb),
+            tel_kb_se = sd(telomere_kb) / sqrt((length(telomere_kb))),
+            tel_ori = mean(TELOMEAN),
+            tel_ori_se = sd(TELOMEAN) / sqrt((length(TELOMEAN))))
+
+summary_data_cvd_status
+
+summary_data_cancer_death_status <- srs_design_srvyr_demo$variables %>% 
+  select(SEQN, TELOMEAN,telomere_kb, cancer_death)%>% 
+  group_by(cancer_death) %>% 
+  summarise(n= n(),
+            tel_kb = mean(telomere_kb),
+            tel_kb_se = sd(telomere_kb) / sqrt((length(telomere_kb))),
+            tel_ori = mean(TELOMEAN),
+            tel_ori_se = sd(TELOMEAN) / sqrt((length(TELOMEAN))))
+
+summary_data_cancer_death_status
+
+summary_data_cvd_death_status <- srs_design_srvyr_demo$variables %>% 
+  select(SEQN, TELOMEAN,telomere_kb, cvd_death)%>% 
+  group_by(cvd_death) %>% 
+  summarise(n= n(),
+            tel_kb = mean(telomere_kb),
+            tel_kb_se = sd(telomere_kb) / sqrt((length(telomere_kb))),
+            tel_ori = mean(TELOMEAN),
+            tel_ori_se = sd(TELOMEAN) / sqrt((length(TELOMEAN))))
+
+summary_data_cvd_death_status
+
+summary_data_death_status <- srs_design_srvyr_demo$variables %>% 
+  select(SEQN, TELOMEAN,telomere_kb, mortstat)%>% 
+  group_by(mortstat) %>% 
+  summarise(n= n(),
+            tel_kb = mean(telomere_kb),
+            tel_kb_se = sd(telomere_kb) / sqrt((length(telomere_kb))),
+            tel_ori = mean(TELOMEAN),
+            tel_ori_se = sd(TELOMEAN) / sqrt((length(TELOMEAN))))
+
+summary_data_death_status
+
+summary_table1 <- full_join(summary_data_age_grp, summary_data_sex) %>% 
+  full_join(summary_data_race) %>% 
+  full_join(summary_data_edu_cat_3) %>% 
+  full_join(summary_data_pir_cat) %>% 
+  full_join(summary_data_smoking_status) %>% 
+  full_join(summary_data_htn_status) %>% 
+  full_join(summary_data_diab_status) %>% 
+  full_join(summary_data_chol_status) %>% 
+  full_join(summary_data_cvd_status) %>% 
+  full_join(summary_data_death_status) %>% 
+  full_join(summary_data_cvd_death_status) %>% 
+  full_join(summary_data_cancer_death_status) 
+
+summary_table1
+
+#write.csv(summary_table1, "summary_table 1_6_6_23.csv", na = " ")
+
+
+#to calculate correaltion between dependent variables
+jtools::svycor(~ as.numeric(edu_cat_3) + as.numeric(pir_cat) +as.numeric(age_grp) +as.numeric(RIAGENDR) +as.numeric(RIDRETH2), design = srs_design_srvyr_demo, sig.stats = TRUE, bootn = 2000, mean1 = TRUE)
+
+
+#Summary of the person-month
+tbl_svysummary(srs_design_srvyr_all, 
+               statistic = list(permth_int ~ "{N_obs}{median}{min}{max}{mean}({mean.std.error})"),
+               include = c(permth_int), 
+               digits = list(permth_int ~ c(2, 2, 2, 2, 2, 2)))
+
+#Summary of the person-year
+tbl_svysummary(srs_design_srvyr_all, 
+               statistic = list(permth_int_yr ~ "({N_obs})({median})({min})({max})({mean})(({mean.std.error}))"),
+               include = c(permth_int_yr), 
+               digits = list(permth_int_yr ~ c(2, 2, 2, 2, 2, 2)))
+
+
+#Characteristic	N = 136,276,6121
+#permth_int	136,276,611.53 220.00 1.00 250.00 200.72(1.02)
+#1 No. obs. Median Minimum Maximum Mean(SE)
+
+
+#to get the table 1 using gtsummary function
+tbl_svysummary_1 <- survey::svydesign(id = ~SDMVPSU, weights = ~WTMEC4YR, strata = ~SDMVSTRA, data = filter(analysis_data_2, data_status_all == 1), nest = TRUE) %>%
+  tbl_svysummary(statistic = list(all_categorical() ~ "{p} ({p.std.error})"), include = c(mortstat)) 
+
+tbl_svysummary_1
+
+tbl_svysummary_2 <- survey::svydesign(id = ~SDMVPSU, weights = ~WTMEC4YR, strata = ~SDMVSTRA, nest = TRUE, 
+                                      data = filter(analysis_data_2, data_status_all == 1)) %>%
+  tbl_svysummary(statistic = list(all_categorical() ~ "{p} ({p.std.error})", 
+                                  all_continuous() ~ "{mean} ({mean.std.error})"), 
+                 by = "mortstat", 
+                 include = c(telomere_kb, age_grp, RIAGENDR, RIDRETH2, edu_cat_3, pir_cat, smoking_status, htn_status, diab_status, chol_status, 
+                             cvd_status, mortstat, cvd_death, cancer_death), 
+                 digits = all_categorical() ~ list(c(2, 2))) %>%
+  add_n()%>% 
+  add_difference()
+
+tbl_svysummary_2
+```
+
+```{r regression models,echo=FALSE}
+#telomere continous model
+model_1a <-svycoxph(Surv(permth_int, mortstat == 1) ~ telomere_kb, 
+                    design = srs_design_srvyr_all)
+
+summary(model_1a)
+
+
+model_1b <-svycoxph(Surv(permth_int, mortstat == 1) ~  telomere_kb +#   + # telomere_kb #  + #middle  
+                      relevel(as.factor(age_grp), ref = "1") +
+                      relevel(as.factor(RIAGENDR), ref = "1") + #male
+                      relevel(as.factor(RIDRETH2), ref = "1") + #white
+                      relevel(as.factor(edu_cat_3), ref = "1") ,#less than high school
+                    design = srs_design_srvyr_all)
+
+summary(model_1b)
+
+
+model_1c <-svycoxph(Surv(permth_int, mortstat == 1) ~  telomere_kb +#   + #  # last quartile telomere length telomere_kb #  + #middle  
+                      relevel(as.factor(age_grp), ref = "1") +
+                      relevel(as.factor(RIAGENDR), ref = "1") + #male
+                      relevel(as.factor(RIDRETH2), ref = "1") + #white
+                      relevel(as.factor(edu_cat_3), ref = "1") + #less than high school
+                      
+                      relevel(as.factor(smoking_status), ref = "1") + #never
+                      relevel(as.factor(cvd_status) , ref = "2") +
+                      relevel(as.factor(htn_status) , ref = "2") +
+                      relevel(as.factor(chol_status) , ref = "2") +
+                      relevel(as.factor(diab_status) , ref = "2"),
+                    design = srs_design_srvyr_all)
+
+summary(model_1c)
+
+#tab_model(model_1c, terms = "telomere_kb")
+
+#tab_model(model_1a,model_1b,model_1c, terms = "telomere_kb")
+
+
+#telomere categorical model
+model_2a <-svycoxph(Surv(permth_int, mortstat == 1) ~ relevel(as.factor(telomere_kb_quartile), ref = "1"), 
+                    design = srs_design_srvyr_all)
+
+summary(model_2a)
+
+model_2b <-svycoxph(Surv(permth_int, mortstat == 1) ~ relevel(as.factor(telomere_kb_quartile), ref = "1") +#   + #  # last quartile telomere length telomere_kb #  + #middle  
+                      relevel(as.factor(age_grp), ref = "1") + #young
+                      relevel(as.factor(RIAGENDR), ref = "1") + #male
+                      relevel(as.factor(RIDRETH2), ref = "1") + #white
+                      relevel(as.factor(edu_cat_3), ref = "1"), #less than high school
+                      
+                    design = srs_design_srvyr_all)
+
+summary(model_2b)
+
+model_2c <-svycoxph(Surv(permth_int, mortstat == 1) ~ relevel(as.factor(telomere_kb_quartile), ref = "1") +#   + #  # last quartile telomere length telomere_kb #  + #middle  
+                      relevel(as.factor(age_grp), ref = "1") +
+                      relevel(as.factor(RIAGENDR), ref = "1") + #male
+                      relevel(as.factor(RIDRETH2), ref = "1") + #white
+                      relevel(as.factor(edu_cat_3), ref = "1")+ #less than high school
+                    
+                      relevel(as.factor(smoking_status), ref = "1") + #never
+                      relevel(as.factor(cvd_status) , ref = "2") +
+                      relevel(as.factor(htn_status) , ref = "2") +
+                      relevel(as.factor(chol_status) , ref = "2") +
+                      relevel(as.factor(diab_status) , ref = "2"),
+                    design = srs_design_srvyr_all)
+
+summary(model_2c)
+
+#tab_model(model_2a,model_2b,model_2c, terms = "telomere kb quartile")
+
+#telomere continous model
+model_3a <-svycoxph(Surv(permth_int, cvd_death == 1) ~ telomere_kb, 
+                    design = srs_design_srvyr_all)
+
+summary(model_3a)
+
+model_3b <-svycoxph(Surv(permth_int, cvd_death == 1) ~  telomere_kb +#   + # telomere_kb #  + #middle  
+                      relevel(as.factor(age_grp), ref = "1") +
+                      relevel(as.factor(RIAGENDR), ref = "1") + #male
+                      relevel(as.factor(RIDRETH2), ref = "1") + #white
+                      relevel(as.factor(edu_cat_3), ref = "1"), #less than high school
+                      
+                    design = srs_design_srvyr_all)
+
+summary(model_3b)
+
+model_3c <-svycoxph(Surv(permth_int, cvd_death == 1) ~  telomere_kb +#   + #  # last quartile telomere length telomere_kb #  + #middle  
+                      relevel(as.factor(age_grp), ref = "1") +
+                      relevel(as.factor(RIAGENDR), ref = "1") + #male
+                      relevel(as.factor(RIDRETH2), ref = "1") + #white
+                      relevel(as.factor(edu_cat_3), ref = "1") + #less than high school
+                      
+                      relevel(as.factor(smoking_status), ref = "1") + #never
+                      relevel(as.factor(cvd_status) , ref = "2") +
+                      relevel(as.factor(htn_status) , ref = "2") +
+                      relevel(as.factor(chol_status) , ref = "2") +
+                      relevel(as.factor(diab_status) , ref = "2"),
+                    design = srs_design_srvyr_all)
+
+summary(model_3c)
+
+#tab_model(model_3a, model_3b, model_3c, terms = "telomere_kb")
+
+#telomere categorical model
+model_4a <-svycoxph(Surv(permth_int, cvd_death == 1) ~ relevel(as.factor(telomere_kb_quartile), ref = "1"), 
+                    design = srs_design_srvyr_all)
+
+summary(model_4a)
+
+model_4b <-svycoxph(Surv(permth_int, cvd_death == 1) ~ relevel(as.factor(telomere_kb_quartile), ref = "1") +#   + #  # last quartile telomere length telomere_kb #  + #middle  
+                      relevel(as.factor(age_grp), ref = "1") +
+                      relevel(as.factor(RIAGENDR), ref = "1") + #male
+                      relevel(as.factor(RIDRETH2), ref = "1") + #white
+                      relevel(as.factor(edu_cat_3), ref = "1"), #less than high school
+                      
+                    design = srs_design_srvyr_all)
+
+summary(model_4b)
+
+model_4c <-svycoxph(Surv(permth_int, cvd_death == 1) ~ relevel(as.factor(telomere_kb_quartile), ref = "1") +#   + #  # last quartile telomere length telomere_kb #  + #middle  
+                      relevel(as.factor(age_grp), ref = "1") +
+                      relevel(as.factor(RIAGENDR), ref = "1") + #male
+                      relevel(as.factor(RIDRETH2), ref = "1") + #white
+                      relevel(as.factor(edu_cat_3), ref = "1") + #less than high school
+                    
+                      relevel(as.factor(smoking_status), ref = "1") + #never
+                      relevel(as.factor(cvd_status) , ref = "2") +
+                      relevel(as.factor(htn_status) , ref = "2") +
+                      relevel(as.factor(chol_status) , ref = "2") +
+                      relevel(as.factor(diab_status) , ref = "2"),
+                    design = srs_design_srvyr_all)
+
+summary(model_4c)
+
+#telomere continous model
+model_5a <-svycoxph(Surv(permth_int, cancer_death== 1) ~ telomere_kb, 
+                    design = srs_design_srvyr_all)
+
+summary(model_5a)
+
+model_5b <-svycoxph(Surv(permth_int, cancer_death== 1) ~  telomere_kb +#   + # telomere_kb #  + #middle  
+                      relevel(as.factor(age_grp), ref = "1") +
+                      relevel(as.factor(RIAGENDR), ref = "1") + #male
+                      relevel(as.factor(RIDRETH2), ref = "1") + #white
+                      relevel(as.factor(edu_cat_3), ref = "1"), #less than high school
+                      
+                    design = srs_design_srvyr_all)
+
+summary(model_5b)
+
+model_5c <-svycoxph(Surv(permth_int, cancer_death== 1) ~  telomere_kb +#   + #  # last quartile telomere length telomere_kb #  + #middle  
+                      relevel(as.factor(age_grp), ref = "1") +
+                      relevel(as.factor(RIAGENDR), ref = "1") + #male
+                      relevel(as.factor(RIDRETH2), ref = "1") + #white
+                      relevel(as.factor(edu_cat_3), ref = "1") + #less than high school
+                      
+                      relevel(as.factor(smoking_status), ref = "1") + #never
+                      relevel(as.factor(cvd_status) , ref = "2") +
+                      relevel(as.factor(htn_status) , ref = "2") +
+                      relevel(as.factor(chol_status) , ref = "2") +
+                      relevel(as.factor(diab_status) , ref = "2"),
+                    design = srs_design_srvyr_all)
+
+summary(model_5c)
+
+#tab_model(model_5a, model_5b, model_5c)
+#telomere categorical model
+model_6a <-svycoxph(Surv(permth_int, cancer_death== 1) ~ relevel(as.factor(telomere_kb_quartile), ref = "1"), 
+                    design = srs_design_srvyr_all)
+
+summary(model_6a)
+
+model_6b <-svycoxph(Surv(permth_int, cancer_death== 1) ~ relevel(as.factor(telomere_kb_quartile), ref = "1") +#   + #  # last quartile telomere length telomere_kb #  + #middle  
+                      relevel(as.factor(age_grp), ref = "1") +
+                      relevel(as.factor(RIAGENDR), ref = "1") + #male
+                      relevel(as.factor(RIDRETH2), ref = "1") + #white
+                      relevel(as.factor(edu_cat_3), ref = "1"), #less than high school
+                      
+                    design = srs_design_srvyr_all)
+
+summary(model_6b)
+
+model_6c <-svycoxph(Surv(permth_int, cancer_death== 1) ~ relevel(as.factor(telomere_kb_quartile), ref = "1") +#   + #  # last quartile telomere length telomere_kb #  + #middle  
+                      relevel(as.factor(age_grp), ref = "1") +
+                      relevel(as.factor(RIAGENDR), ref = "1") + #male
+                      relevel(as.factor(RIDRETH2), ref = "1") + #white
+                      relevel(as.factor(edu_cat_3), ref = "1") + #less than high school
+                      
+                      relevel(as.factor(smoking_status), ref = "1") + #never
+                      relevel(as.factor(cvd_status) , ref = "2") +
+                      relevel(as.factor(htn_status) , ref = "2") +
+                      relevel(as.factor(chol_status) , ref = "2") +
+                      relevel(as.factor(diab_status) , ref = "2"),
+                    design = srs_design_srvyr_all)
+
+summary(model_6c)
+
+#sjPlot::tab_model(model_6c)
+
+#tab_model(model_5a, model_5b, model_5c)
+
+#tab_model(model_6a, model_6b, model_6c)
+
+table(srs_design_srvyr_all$variables$telomere_kb_quartile, srs_design_srvyr_all$variables$mortstat)
+
+table(srs_design_srvyr_all$variables$telomere_kb_quartile, srs_design_srvyr_all$variables$cvd_death)
+
+table(srs_design_srvyr_all$variables$telomere_kb_quartile, srs_design_srvyr_all$variables$cancer_death)
+
+
+# merge tables
+
+tbl_merge_tl_all_cause <-
+  tbl_merge(
+    tbls = list(tbl_regression(model_1a, include = c(telomere_kb), exponentiate = TRUE),
+                tbl_regression(model_1b, include = c(telomere_kb), exponentiate = TRUE),
+                tbl_regression(model_1c, include = c(telomere_kb), exponentiate = TRUE)),
+    tab_spanner = c("**Model 1**", "**Model 2**", "**Model 3**")
+  )
+
+tbl_merge_tl_all_cause
+
+
+tbl_merge_tl_quar_all_cause <-
+  tbl_merge(
+    tbls = list(tbl_regression(model_2a, include = c('relevel(as.factor(telomere_kb_quartile), ref = "1")'), exponentiate = TRUE),
+                tbl_regression(model_2b, include = c('relevel(as.factor(telomere_kb_quartile), ref = "1")'), exponentiate = TRUE),
+                tbl_regression(model_2c, include = c('relevel(as.factor(telomere_kb_quartile), ref = "1")'), exponentiate = TRUE)),
+    tab_spanner = c("**Model 1**", "**Model 2**", "**Model 3**"))
+
+tbl_merge_tl_quar_all_cause
+
+tbl_merge_tl_cvd <-
+  tbl_merge(
+    tbls = list(tbl_regression(model_3a, include = c(telomere_kb), exponentiate = TRUE),
+                tbl_regression(model_3b, include = c(telomere_kb), exponentiate = TRUE),
+                tbl_regression(model_3c, include = c(telomere_kb), exponentiate = TRUE)),
+    tab_spanner = c("**Model 1**", "**Model 2**", "**Model 3**")
+  )
+
+tbl_merge_tl_cvd
+
+
+tbl_merge_tl_quar_cvd <-
+  tbl_merge(
+    tbls = list(tbl_regression(model_4a, include = c('relevel(as.factor(telomere_kb_quartile), ref = "1")'), exponentiate = TRUE),
+                tbl_regression(model_4b, include = c('relevel(as.factor(telomere_kb_quartile), ref = "1")'), exponentiate = TRUE),
+                tbl_regression(model_4c, include = c('relevel(as.factor(telomere_kb_quartile), ref = "1")'), exponentiate = TRUE)),
+    tab_spanner = c("**Model 1**", "**Model 2**", "**Model 3**"))
+
+tbl_merge_tl_quar_cvd
+
+tbl_merge_tl_cancer <-
+  tbl_merge(
+    tbls = list(tbl_regression(model_5a, include = c(telomere_kb), exponentiate = TRUE),
+                tbl_regression(model_5b, include = c(telomere_kb), exponentiate = TRUE),
+                tbl_regression(model_5c, include = c(telomere_kb), exponentiate = TRUE)),
+    tab_spanner = c("**Model 1**", "**Model 2**", "**Model 3**")
+  )
+
+tbl_merge_tl_cancer
+
+
+tbl_merge_tl_quar_cancer <-
+  tbl_merge(
+    tbls = list(tbl_regression(model_6a, include = c('relevel(as.factor(telomere_kb_quartile), ref = "1")'), exponentiate = TRUE),
+                tbl_regression(model_6b, include = c('relevel(as.factor(telomere_kb_quartile), ref = "1")'), exponentiate = TRUE),
+                tbl_regression(model_6c, include = c('relevel(as.factor(telomere_kb_quartile), ref = "1")'), exponentiate = TRUE)),
+    tab_spanner = c("**Model 1**", "**Model 2**", "**Model 3**"))
+
+tbl_merge_tl_quar_cancer
+
+#tbl %>%
+ # as_gt() %>%
+  #gt::gtsave(filename = ".") # use extensions .png, .html, .docx, .rtf, .tex, .ltx
+```
+
+```{r regression reverse ref for telomere models,echo=FALSE}
+#telomere continous model
+
+rev_model_1a <-svycoxph(Surv(permth_int, mortstat == 1) ~ telomere_kb_rec, 
+                        design = srs_design_srvyr_all)
+
+summary(rev_model_1a)
+
+
+rev_model_1b <-svycoxph(Surv(permth_int, mortstat == 1) ~  telomere_kb_rec +#   + # telomere_kb #  + #middle  
+                          relevel(as.factor(age_grp), ref = "1") +
+                          relevel(as.factor(RIAGENDR), ref = "1") + #male
+                          relevel(as.factor(RIDRETH2), ref = "1") + #white
+                          relevel(as.factor(edu_cat_3), ref = "1") ,#less than high school
+                        design = srs_design_srvyr_all)
+
+summary(rev_model_1b)
+
+
+rev_model_1c <-svycoxph(Surv(permth_int, mortstat == 1) ~  telomere_kb_rec +#   + #  # last quartile telomere length telomere_kb #  + #middle  
+                          relevel(as.factor(age_grp), ref = "1") +
+                          relevel(as.factor(RIAGENDR), ref = "1") + #male
+                          relevel(as.factor(RIDRETH2), ref = "1") + #white
+                          relevel(as.factor(edu_cat_3), ref = "1") + #less than high school
+                          
+                          relevel(as.factor(smoking_status), ref = "1") + #never
+                          relevel(as.factor(cvd_status) , ref = "2") +
+                          relevel(as.factor(htn_status) , ref = "2") +
+                          relevel(as.factor(chol_status) , ref = "2") +
+                          relevel(as.factor(diab_status) , ref = "2"),
+                        design = srs_design_srvyr_all)
+
+summary(rev_model_1c)
+
+#tab_model(rev_model_1c, terms = "telomere_kb")
+
+#tab_model(rev_model_1a,rev_model_1b,rev_model_1c, terms = "telomere_kb")
+
+
+#telomere categorical model
+rev_model_2a <-svycoxph(Surv(permth_int, mortstat == 1) ~ relevel(as.factor(telomere_kb_quartile), ref = "4"), 
+                        design = srs_design_srvyr_all)
+
+summary(rev_model_2a)
+
+rev_model_2b <-svycoxph(Surv(permth_int, mortstat == 1) ~ relevel(as.factor(telomere_kb_quartile), ref = "4") +#   + #  # last quartile telomere length telomere_kb #  + #middle  
+                          relevel(as.factor(age_grp), ref = "1") + #young
+                          relevel(as.factor(RIAGENDR), ref = "1") + #male
+                          relevel(as.factor(RIDRETH2), ref = "1") + #white
+                          relevel(as.factor(edu_cat_3), ref = "1"), #less than high school
+                        
+                        design = srs_design_srvyr_all)
+
+summary(rev_model_2b)
+
+rev_model_2c <-svycoxph(Surv(permth_int, mortstat == 1) ~ relevel(as.factor(telomere_kb_quartile), ref = "4") +#   + #  # last quartile telomere length telomere_kb #  + #middle  
+                          relevel(as.factor(age_grp), ref = "1") +
+                          relevel(as.factor(RIAGENDR), ref = "1") + #male
+                          relevel(as.factor(RIDRETH2), ref = "1") + #white
+                          relevel(as.factor(edu_cat_3), ref = "1")+ #less than high school
+                          
+                          relevel(as.factor(smoking_status), ref = "1") + #never
+                          relevel(as.factor(cvd_status) , ref = "2") +
+                          relevel(as.factor(htn_status) , ref = "2") +
+                          relevel(as.factor(chol_status) , ref = "2") +
+                          relevel(as.factor(diab_status) , ref = "2"),
+                        design = srs_design_srvyr_all)
+
+summary(rev_model_2c)
+
+#tab_model(rev_model_2a,rev_model_2b,rev_model_2c, terms = "telomere kb quartile")
+
+#telomere continous model
+rev_model_3a <-svycoxph(Surv(permth_int, cvd_death == 1) ~ telomere_kb_rec, 
+                        design = srs_design_srvyr_all)
+
+summary(rev_model_3a)
+
+rev_model_3b <-svycoxph(Surv(permth_int, cvd_death == 1) ~  telomere_kb_rec +#   + # telomere_kb #  + #middle  
+                          relevel(as.factor(age_grp), ref = "1") +
+                          relevel(as.factor(RIAGENDR), ref = "1") + #male
+                          relevel(as.factor(RIDRETH2), ref = "1") + #white
+                          relevel(as.factor(edu_cat_3), ref = "1"), #less than high school
+                        
+                        design = srs_design_srvyr_all)
+
+summary(rev_model_3b)
+
+rev_model_3c <-svycoxph(Surv(permth_int, cvd_death == 1) ~  telomere_kb_rec +#   + #  # last quartile telomere length telomere_kb #  + #middle  
+                          relevel(as.factor(age_grp), ref = "1") +
+                          relevel(as.factor(RIAGENDR), ref = "1") + #male
+                          relevel(as.factor(RIDRETH2), ref = "1") + #white
+                          relevel(as.factor(edu_cat_3), ref = "1") + #less than high school
+                          
+                          relevel(as.factor(smoking_status), ref = "1") + #never
+                          relevel(as.factor(cvd_status) , ref = "2") +
+                          relevel(as.factor(htn_status) , ref = "2") +
+                          relevel(as.factor(chol_status) , ref = "2") +
+                          relevel(as.factor(diab_status) , ref = "2"),
+                        design = srs_design_srvyr_all)
+
+summary(rev_model_3c)
+
+#tab_model(rev_model_3a, rev_model_3b, rev_model_3c, terms = "telomere_kb")
+
+#telomere categorical model
+rev_model_4a <-svycoxph(Surv(permth_int, cvd_death == 1) ~ relevel(as.factor(telomere_kb_quartile), ref = "4"), 
+                        design = srs_design_srvyr_all)
+
+summary(rev_model_4a)
+
+rev_model_4b <-svycoxph(Surv(permth_int, cvd_death == 1) ~ relevel(as.factor(telomere_kb_quartile), ref = "4") +#   + #  # last quartile telomere length telomere_kb #  + #middle  
+                          relevel(as.factor(age_grp), ref = "1") +
+                          relevel(as.factor(RIAGENDR), ref = "1") + #male
+                          relevel(as.factor(RIDRETH2), ref = "1") + #white
+                          relevel(as.factor(edu_cat_3), ref = "1"), #less than high school
+                        
+                        design = srs_design_srvyr_all)
+
+summary(rev_model_4b)
+
+rev_model_4c <-svycoxph(Surv(permth_int, cvd_death == 1) ~ relevel(as.factor(telomere_kb_quartile), ref = "4") +#   + #  # last quartile telomere length telomere_kb #  + #middle  
+                          relevel(as.factor(age_grp), ref = "1") +
+                          relevel(as.factor(RIAGENDR), ref = "1") + #male
+                          relevel(as.factor(RIDRETH2), ref = "1") + #white
+                          relevel(as.factor(edu_cat_3), ref = "1") + #less than high school
+                          
+                          relevel(as.factor(smoking_status), ref = "1") + #never
+                          relevel(as.factor(cvd_status) , ref = "2") +
+                          relevel(as.factor(htn_status) , ref = "2") +
+                          relevel(as.factor(chol_status) , ref = "2") +
+                          relevel(as.factor(diab_status) , ref = "2"),
+                        design = srs_design_srvyr_all)
+
+summary(rev_model_4c)
+
+#telomere continous model
+rev_model_5a <-svycoxph(Surv(permth_int, cancer_death== 1) ~ telomere_kb_rec, 
+                        design = srs_design_srvyr_all)
+
+summary(rev_model_5a)
+
+rev_model_5b <-svycoxph(Surv(permth_int, cancer_death== 1) ~  telomere_kb_rec +#   + # telomere_kb #  + #middle  
+                          relevel(as.factor(age_grp), ref = "1") +
+                          relevel(as.factor(RIAGENDR), ref = "1") + #male
+                          relevel(as.factor(RIDRETH2), ref = "1") + #white
+                          relevel(as.factor(edu_cat_3), ref = "1"), #less than high school
+                        
+                        design = srs_design_srvyr_all)
+
+summary(rev_model_5b)
+
+rev_model_5c <-svycoxph(Surv(permth_int, cancer_death== 1) ~  telomere_kb_rec +#   + #  # last quartile telomere length telomere_kb #  + #middle  
+                          relevel(as.factor(age_grp), ref = "1") +
+                          relevel(as.factor(RIAGENDR), ref = "1") + #male
+                          relevel(as.factor(RIDRETH2), ref = "1") + #white
+                          relevel(as.factor(edu_cat_3), ref = "1") + #less than high school
+                          
+                          relevel(as.factor(smoking_status), ref = "1") + #never
+                          relevel(as.factor(cvd_status) , ref = "2") +
+                          relevel(as.factor(htn_status) , ref = "2") +
+                          relevel(as.factor(chol_status) , ref = "2") +
+                          relevel(as.factor(diab_status) , ref = "2"),
+                        design = srs_design_srvyr_all)
+
+summary(rev_model_5c)
+
+#tab_model(rev_model_5a, rev_model_5b, rev_model_5c)
+#telomere categorical model
+rev_model_6a <-svycoxph(Surv(permth_int, cancer_death== 1) ~ relevel(as.factor(telomere_kb_quartile), ref = "4"), 
+                        design = srs_design_srvyr_all)
+
+summary(rev_model_6a)
+
+rev_model_6b <-svycoxph(Surv(permth_int, cancer_death== 1) ~ relevel(as.factor(telomere_kb_quartile), ref = "4") +#   + #  # last quartile telomere length telomere_kb #  + #middle  
+                          relevel(as.factor(age_grp), ref = "1") +
+                          relevel(as.factor(RIAGENDR), ref = "1") + #male
+                          relevel(as.factor(RIDRETH2), ref = "1") + #white
+                          relevel(as.factor(edu_cat_3), ref = "1"), #less than high school
+                        
+                        design = srs_design_srvyr_all)
+
+summary(rev_model_6b)
+
+rev_model_6c <-svycoxph(Surv(permth_int, cancer_death== 1) ~ relevel(as.factor(telomere_kb_quartile), ref = "4") +#   + #  # last quartile telomere length telomere_kb #  + #middle  
+                          relevel(as.factor(age_grp), ref = "1") +
+                          relevel(as.factor(RIAGENDR), ref = "1") + #male
+                          relevel(as.factor(RIDRETH2), ref = "1") + #white
+                          relevel(as.factor(edu_cat_3), ref = "1") + #less than high school
+                          
+                          relevel(as.factor(smoking_status), ref = "1") + #never
+                          relevel(as.factor(cvd_status) , ref = "2") +
+                          relevel(as.factor(htn_status) , ref = "2") +
+                          relevel(as.factor(chol_status) , ref = "2") +
+                          relevel(as.factor(diab_status) , ref = "2"),
+                        design = srs_design_srvyr_all)
+
+summary(rev_model_6c)
+
+#sjPlot::tab_model(rev_model_6c)
+
+#tab_model(rev_model_5a, rev_model_5b, rev_model_5c)
+
+#tab_model(rev_model_6a, rev_model_6b, rev_model_6c)
+
+table(srs_design_srvyr_all$variables$age_grp,srs_design_srvyr_all$variables$mortstat, srs_design_srvyr_all$variables$RIDRETH2)
+
+table( srs_design_srvyr_all$variables$telomere_kb_quartile,srs_design_srvyr_all$variables$mortstat , srs_design_srvyr_all$variables$age_grp, srs_design_srvyr_all$variables$RIDRETH2)
+
+# merge tables
+
+tbl_merge_tl_all_cause_inv <-
+  tbl_merge(
+    tbls = list(tbl_regression(rev_model_1a, include = c(telomere_kb_rec), exponentiate = TRUE),
+                tbl_regression(rev_model_1b, include = c(telomere_kb_rec), exponentiate = TRUE),
+                tbl_regression(rev_model_1c, include = c(telomere_kb_rec), exponentiate = TRUE)),
+    tab_spanner = c("**Model 1**", "**Model 2**", "**Model 3**")
+  )
+
+tbl_merge_tl_all_cause_inv
+
+
+tbl_merge_tl_quar_all_cause_inv <-
+  tbl_merge(
+    tbls = list(tbl_regression(rev_model_2a, include = c('relevel(as.factor(telomere_kb_quartile), ref = "4")'), exponentiate = TRUE),
+                tbl_regression(rev_model_2b, include = c('relevel(as.factor(telomere_kb_quartile), ref = "4")'), exponentiate = TRUE),
+                tbl_regression(rev_model_2c, include = c('relevel(as.factor(telomere_kb_quartile), ref = "4")'), exponentiate = TRUE)),
+    tab_spanner = c("**Model 1**", "**Model 2**", "**Model 3**"))
+
+tbl_merge_tl_quar_all_cause_inv
+
+tbl_merge_tl_cvd_inv <-
+  tbl_merge(
+    tbls = list(tbl_regression(rev_model_3a, include = c(telomere_kb_rec), exponentiate = TRUE),
+                tbl_regression(rev_model_3b, include = c(telomere_kb_rec), exponentiate = TRUE),
+                tbl_regression(rev_model_3c, include = c(telomere_kb_rec), exponentiate = TRUE)),
+    tab_spanner = c("**Model 1**", "**Model 2**", "**Model 3**")
+  )
+
+tbl_merge_tl_cvd_inv
+
+
+tbl_merge_tl_quar_cvd_inv <-
+  tbl_merge(
+    tbls = list(tbl_regression(rev_model_4a, include = c('relevel(as.factor(telomere_kb_quartile), ref = "4")'), exponentiate = TRUE),
+                tbl_regression(rev_model_4b, include = c('relevel(as.factor(telomere_kb_quartile), ref = "4")'), exponentiate = TRUE),
+                tbl_regression(rev_model_4c, include = c('relevel(as.factor(telomere_kb_quartile), ref = "4")'), exponentiate = TRUE)),
+    tab_spanner = c("**Model 1**", "**Model 2**", "**Model 3**"))
+
+tbl_merge_tl_quar_cvd_inv
+
+tbl_merge_tl_cancer_inv <-
+  tbl_merge(
+    tbls = list(tbl_regression(rev_model_5a, include = c(telomere_kb_rec), exponentiate = TRUE),
+                tbl_regression(rev_model_5b, include = c(telomere_kb_rec), exponentiate = TRUE),
+                tbl_regression(rev_model_5c, include = c(telomere_kb_rec), exponentiate = TRUE)),
+    tab_spanner = c("**Model 1**", "**Model 2**", "**Model 3**")
+  )
+
+tbl_merge_tl_cancer_inv
+
+
+tbl_merge_tl_quar_cancer_inv <-
+  tbl_merge(
+    tbls = list(tbl_regression(rev_model_6a, include = c('relevel(as.factor(telomere_kb_quartile), ref = "4")'), exponentiate = TRUE),
+                tbl_regression(rev_model_6b, include = c('relevel(as.factor(telomere_kb_quartile), ref = "4")'), exponentiate = TRUE),
+                tbl_regression(rev_model_6c, include = c('relevel(as.factor(telomere_kb_quartile), ref = "4")'), exponentiate = TRUE)),
+    tab_spanner = c("**Model 1**", "**Model 2**", "**Model 3**"))
+
+tbl_merge_tl_quar_cancer_inv
+
+```
+
+```{r interaction regression models with telomere, race and age group, echo=FALSE}
+#11/08/2023-interaction in the fully adjusted model
+model_7 <-svycoxph(Surv(permth_int, mortstat == 1) ~  relevel(as.factor(telomere_kb_quartile), ref = "1") +#   + #  # last quartile telomere length telomere_kb #  + #middle 
+                     relevel(as.factor(age_grp), ref = "1") +
+                     relevel(as.factor(RIAGENDR), ref = "1") + #male
+                     relevel(as.factor(RIDRETH2), ref = "1") + #white
+                     relevel(as.factor(edu_cat_3), ref = "1") +  #less than high school
+                     relevel(as.factor(smoking_status), ref = "1") + #never
+                     relevel(as.factor(cvd_status) , ref = "2") +
+                     relevel(as.factor(htn_status) , ref = "2") +
+                     relevel(as.factor(chol_status) , ref = "2") +
+                     relevel(as.factor(diab_status) , ref = "2") +
+                     age_grp_race + race_telomere + age_grp_telomere + age_grp_race_telomere,
+                   design = srs_design_srvyr_all)
+
+summary(model_7)
+
+model_7a <- svycoxph(Surv(permth_int, mortstat == 1) ~ relevel(as.factor(telomere_kb_quartile), ref = "1") + #middle 
+                       relevel(as.factor(RIAGENDR), ref = "1") + #male
+                       relevel(as.factor(edu_cat_3), ref = "1"),   #less than high school
+                     design = srs_design_srvyr_all_1_1)
+
+summary(model_7a)
+
+model_7b <- svycoxph(Surv(permth_int, mortstat == 1) ~ relevel(as.factor(telomere_kb_quartile), ref = "1") + #middle 
+                       relevel(as.factor(RIAGENDR), ref = "1") + #male
+                       relevel(as.factor(edu_cat_3), ref = "1"),  #less than high school
+                     design = srs_design_srvyr_all_1_2)
+
+summary(model_7b)
+
+model_7c <- svycoxph(Surv(permth_int, mortstat == 1) ~ relevel(as.factor(telomere_kb_quartile), ref = "1") + #middle 
+                       relevel(as.factor(RIAGENDR), ref = "1") + #male
+                       relevel(as.factor(edu_cat_3), ref = "1"),  #less than high school
+                     design = srs_design_srvyr_all_1_3)
+
+summary(model_7c)
+
+model_7d <- svycoxph(Surv(permth_int, mortstat == 1) ~ relevel(as.factor(telomere_kb_quartile), ref = "1") + #middle 
+                       relevel(as.factor(RIAGENDR), ref = "1") + #male
+                       relevel(as.factor(edu_cat_3), ref = "1"),  #less than high school
+                     design = srs_design_srvyr_all_2_1)
+
+summary(model_7d)
+
+model_7e <- svycoxph(Surv(permth_int, mortstat == 1) ~ relevel(as.factor(telomere_kb_quartile), ref = "1") + #middle 
+                       relevel(as.factor(RIAGENDR), ref = "1") + #male
+                       relevel(as.factor(edu_cat_3), ref = "1"),  #less than high school
+                     design = srs_design_srvyr_all_2_2)
+
+summary(model_7e)
+
+model_7f <- svycoxph(Surv(permth_int, mortstat == 1) ~ relevel(as.factor(telomere_kb_quartile), ref = "1") + #middle 
+                       relevel(as.factor(RIAGENDR), ref = "1")+ #male
+                       relevel(as.factor(edu_cat_3), ref = "1"),  #less than high school
+                       design = srs_design_srvyr_all_2_3)
+
+summary(model_7f)
+
+model_7g <- svycoxph(Surv(permth_int, mortstat == 1) ~ relevel(as.factor(telomere_kb_quartile), ref = "1") + #middle 
+                       relevel(as.factor(RIAGENDR), ref = "1") + #male
+                       relevel(as.factor(edu_cat_3), ref = "1"),  #less than high school
+                     
+                     design = srs_design_srvyr_all_3_1)
+
+summary(model_7g)
+
+model_7h <- svycoxph(Surv(permth_int, mortstat == 1) ~ relevel(as.factor(telomere_kb_quartile), ref = "1") + #middle 
+                       relevel(as.factor(RIAGENDR), ref = "1") + #male
+                       relevel(as.factor(edu_cat_3), ref = "1"),  #less than high school
+                     
+                     design = srs_design_srvyr_all_3_2)
+
+summary(model_7h)
+
+model_7i <- svycoxph(Surv(permth_int, mortstat == 1) ~ relevel(as.factor(telomere_kb_quartile), ref = "1") + #middle 
+                       relevel(as.factor(RIAGENDR), ref = "1") + #male
+                       relevel(as.factor(edu_cat_3), ref = "1"),  #less than high school
+                     
+                     design = srs_design_srvyr_all_3_3)
+
+summary(model_7i)
+
+model_8 <-svycoxph(Surv(permth_int, mortstat == 1) ~  telomere_kb +
+                     relevel(as.factor(age_grp), ref = "1") +
+                     relevel(as.factor(RIAGENDR), ref = "1") + #male
+                     relevel(as.factor(RIDRETH2), ref = "1") + #white
+                     relevel(as.factor(edu_cat_3), ref = "1") +  #less than high school
+                     
+                    age_grp_race + race_telomere + age_grp_telomere + age_grp_race_telomere,
+                   design = srs_design_srvyr_demo)
+
+summary(model_8)
+
+model_8a <- svycoxph(Surv(permth_int, mortstat == 1) ~ telomere_kb +
+                       relevel(as.factor(RIAGENDR), ref = "1") + #male
+                       relevel(as.factor(edu_cat_3), ref = "1"),  #less than high school
+                     
+                     design = srs_design_srvyr_all_1_1)
+
+summary(model_8a)
+
+model_8b <- svycoxph(Surv(permth_int, mortstat == 1) ~ telomere_kb +
+                       relevel(as.factor(RIAGENDR), ref = "1") + #male
+                       relevel(as.factor(edu_cat_3), ref = "1"),  #less than high school
+                     
+                     design = srs_design_srvyr_all_1_2)
+
+summary(model_8b)
+
+model_8c <- svycoxph(Surv(permth_int, mortstat == 1) ~ telomere_kb +
+                       relevel(as.factor(RIAGENDR), ref = "1") + #male
+                       relevel(as.factor(edu_cat_3), ref = "1"),  #less than high school
+                     
+                     design = srs_design_srvyr_all_1_3)
+
+summary(model_8c)
+
+model_8d <- svycoxph(Surv(permth_int, mortstat == 1) ~ telomere_kb +
+                       relevel(as.factor(RIAGENDR), ref = "1") + #male
+                       relevel(as.factor(edu_cat_3), ref = "1"),  #less than high school
+                     
+                     design = srs_design_srvyr_all_2_1)
+
+summary(model_8d)
+
+model_8e <- svycoxph(Surv(permth_int, mortstat == 1) ~ telomere_kb +
+                       relevel(as.factor(RIAGENDR), ref = "1") + #male
+                       relevel(as.factor(edu_cat_3), ref = "1"),  #less than high school
+                     
+                     design = srs_design_srvyr_all_2_2)
+
+summary(model_8e)
+
+model_8f <- svycoxph(Surv(permth_int, mortstat == 1) ~ telomere_kb +
+                       relevel(as.factor(RIAGENDR), ref = "1") + #male
+                       relevel(as.factor(edu_cat_3), ref = "1"),  #less than high school
+                     
+                     design = srs_design_srvyr_all_2_3)
+
+summary(model_8f)
+
+model_8g <- svycoxph(Surv(permth_int, mortstat == 1) ~ telomere_kb +
+                       relevel(as.factor(RIAGENDR), ref = "1") + #male
+                       relevel(as.factor(edu_cat_3), ref = "1"),  #less than high school
+                     
+                     design = srs_design_srvyr_all_3_1)
+
+summary(model_8g)
+
+model_8h <- svycoxph(Surv(permth_int, mortstat == 1) ~ telomere_kb +
+                       relevel(as.factor(RIAGENDR), ref = "1") + #male
+                       relevel(as.factor(edu_cat_3), ref = "1"),  #less than high school
+                     
+                     design = srs_design_srvyr_all_3_2)
+
+summary(model_8h)
+
+model_8i <- svycoxph(Surv(permth_int, mortstat == 1) ~ telomere_kb +
+                       relevel(as.factor(RIAGENDR), ref = "1") + #male
+                       relevel(as.factor(edu_cat_3), ref = "1"),  #less than high school
+                     
+                     design = srs_design_srvyr_all_3_3)
+
+summary(model_8i)
+
+table(srs_design_srvyr_all$variables$age_grp,srs_design_srvyr_all$variables$mortstat, srs_design_srvyr_all$variables$RIDRETH2)
+
+table( srs_design_srvyr_all$variables$telomere_kb_quartile,srs_design_srvyr_all$variables$mortstat , srs_design_srvyr_all$variables$age_grp, srs_design_srvyr_all$variables$RIDRETH2)
+
+tbl_inter_mod_7 <- tbl_regression(model_7, exponentiate = TRUE, include = c('relevel(as.factor(telomere_kb_quartile), ref = "1")', 'age_grp_race', 'race_telomere', 'age_grp_telomere', 'age_grp_race_telomere'))
+
+tbl_inter_mod_7
+
+tbl_inter_mod_7_1 <-
+  tbl_merge(
+    tbls = list(
+      tbl_regression(model_7a, exponentiate = TRUE, include = c('relevel(as.factor(telomere_kb_quartile), ref = "1")')),
+      tbl_regression(model_7b, exponentiate = TRUE, include = c('relevel(as.factor(telomere_kb_quartile), ref = "1")')),
+      tbl_regression(model_7c, exponentiate = TRUE, include = c('relevel(as.factor(telomere_kb_quartile), ref = "1")'))),
+    tab_spanner = c("**Young-White**", "**Young-Black**", "**Young-Hispanic**"))
+
+tbl_inter_mod_7_1
+
+tbl_inter_mod_7_2 <-
+  tbl_merge(
+    tbls = list(
+      tbl_regression(model_7d, exponentiate = TRUE, include = c('relevel(as.factor(telomere_kb_quartile), ref = "1")')),
+      tbl_regression(model_7e, exponentiate = TRUE, include = c('relevel(as.factor(telomere_kb_quartile), ref = "1")')),
+      tbl_regression(model_7f, exponentiate = TRUE, include = c('relevel(as.factor(telomere_kb_quartile), ref = "1")'))),
+    tab_spanner = c("**Middle-White**", "**Middle-Black**", "**Middle-HIspanic**"))
+
+tbl_inter_mod_7_2
+
+tbl_inter_mod_7_3 <-
+  tbl_merge(
+    tbls = list(
+      tbl_regression(model_7g, exponentiate = TRUE, include = c('relevel(as.factor(telomere_kb_quartile), ref = "1")')),
+      tbl_regression(model_7h, exponentiate = TRUE, include = c('relevel(as.factor(telomere_kb_quartile), ref = "1")')),
+      tbl_regression(model_7i, exponentiate = TRUE, include = c('relevel(as.factor(telomere_kb_quartile), ref = "1")'))),
+    tab_spanner = c("**Old-White**", "**Old-Black**", "**Old-HIspanic**"))
+
+tbl_inter_mod_7_3
+
+# List of model names
+model_names <- c("model_7a", "model_7b", "model_7c", "model_7d", "model_7e", "model_7f", "model_7g", "model_7h", "model_7i")
+
+# Create an empty list to store the resulting tables
+tbl_list <- list()
+
+# Loop through each model
+for (model_name in model_names) {
+  # Generate the table for the current model
+  tbl <- tbl_regression(
+    eval(parse(text = model_name)),  # Evaluate the model object dynamically
+    exponentiate = TRUE,
+    include = c('relevel(as.factor(telomere_kb_quartile), ref = "1")')
+  )
+  
+  # Add the table to the list with a custom name
+  tbl_list[[model_name]] <- tbl
+}
+
+# Merge the tables using tbl_merge and provide appropriate spanners
+tbl_merged <- tbl_merge(tbls = tbl_list, tab_spanner = model_names)
+
+# Print the merged table
+tbl_merged
+
+
+tbl_inter_mod_8 <- tbl_regression(model_8, exponentiate = TRUE, include = c('telomere_kb', 'age_grp_race', 'race_telomere', 'age_grp_telomere', 'age_grp_race_telomere'))
+
+tbl_inter_mod_8
+
+tbl_inter_mod_8_1 <-
+  tbl_merge(
+    tbls = list(
+      tbl_regression(model_8a, exponentiate = TRUE, include = c(telomere_kb)),
+      tbl_regression(model_8b, exponentiate = TRUE, include = c(telomere_kb)),
+      tbl_regression(model_8c, exponentiate = TRUE, include = c(telomere_kb))),
+    tab_spanner = c("**Young-White**", "**Young-Black**", "**Young-Hispanic**"))
+
+tbl_inter_mod_8_1
+
+tbl_inter_mod_8_2 <-
+  tbl_merge(
+    tbls = list(
+      tbl_regression(model_8d, exponentiate = TRUE, include = c(telomere_kb)),
+      tbl_regression(model_8e, exponentiate = TRUE, include = c(telomere_kb)),
+      tbl_regression(model_8f, exponentiate = TRUE, include = c(telomere_kb))),
+    tab_spanner = c("**Middle-White**", "**Middle-Black**", "**Middle-HIspanic**"))
+
+tbl_inter_mod_8_2
+
+tbl_inter_mod_8_3 <-
+  tbl_merge(
+    tbls = list(
+      tbl_regression(model_8g, exponentiate = TRUE, include = c(telomere_kb)),
+      tbl_regression(model_8h, exponentiate = TRUE, include = c(telomere_kb)),
+      tbl_regression(model_8i, exponentiate = TRUE, include = c(telomere_kb))),
+    tab_spanner = c("**Old-White**", "**Old-Black**", "**Old-HIspanic**"))
+
+tbl_inter_mod_8_3
+```
+
+```{r interaction regression models with race, echo=FALSE}
+srs_design_srvyr_all_1 <- analysis_data_2 %>% 
+  as_survey_design(id = SDMVPSU, strata = SDMVSTRA, weights = WTMEC4YR, nest = TRUE) %>% 
+  filter(data_status_all == 1 & RIDRETH2 ==1)
+
+srs_design_srvyr_all_2 <- analysis_data_2 %>% 
+  as_survey_design(id = SDMVPSU, strata = SDMVSTRA, weights = WTMEC4YR, nest = TRUE) %>% 
+  filter(data_status_all == 1 & RIDRETH2 ==2) 
+
+srs_design_srvyr_all_3 <- analysis_data_2 %>% 
+  as_survey_design(id = SDMVPSU, strata = SDMVSTRA, weights = WTMEC4YR, nest = TRUE) %>% 
+  filter(data_status_all == 1 & RIDRETH2 ==3) 
+
+model_9 <-svycoxph(Surv(permth_int, mortstat == 1) ~  relevel(as.factor(telomere_kb_quartile), ref = "1") +#   + #  # last quartile telomere length telomere_kb #  + #middle 
+                     relevel(as.factor(age_grp), ref = "1") +
+                     relevel(as.factor(RIAGENDR), ref = "1") + #male
+                     relevel(as.factor(RIDRETH2), ref = "1") + #white
+                     relevel(as.factor(edu_cat_3), ref = "1") +  #less than high school
+                     
+                     race_telomere,
+                   design = srs_design_srvyr_all)
+
+summary(model_9)
+
+model_9a <- svycoxph(Surv(permth_int, mortstat == 1) ~ relevel(as.factor(telomere_kb_quartile), ref = "1") + #middle 
+                       relevel(as.factor(age_grp), ref = "1") +
+                       relevel(as.factor(RIAGENDR), ref = "1") + #male
+                       relevel(as.factor(edu_cat_3), ref = "1"),  #less than high school
+                     
+                     design = srs_design_srvyr_all_1)
+
+summary(model_9a)
+
+model_9b <- svycoxph(Surv(permth_int, mortstat == 1) ~ relevel(as.factor(telomere_kb_quartile), ref = "1") + #middle 
+                       relevel(as.factor(age_grp), ref = "1") +
+                       relevel(as.factor(RIAGENDR), ref = "1") + #male
+                       relevel(as.factor(edu_cat_3), ref = "1"),  #less than high school
+                     
+                     design = srs_design_srvyr_all_2)
+
+summary(model_9b)
+
+model_9c <- svycoxph(Surv(permth_int, mortstat == 1) ~ relevel(as.factor(telomere_kb_quartile), ref = "1") + #middle 
+                       relevel(as.factor(age_grp), ref = "1") +
+                       relevel(as.factor(RIAGENDR), ref = "1") + #male
+                       relevel(as.factor(edu_cat_3), ref = "1"),  #less than high school
+                     
+                     design = srs_design_srvyr_all_3)
+
+summary(model_9c)
+
+
+model_10 <-svycoxph(Surv(permth_int, mortstat == 1) ~  telomere_kb +
+                      relevel(as.factor(age_grp), ref = "1") +
+                      relevel(as.factor(RIAGENDR), ref = "1") + #male
+                      relevel(as.factor(RIDRETH2), ref = "1") + #white
+                      relevel(as.factor(edu_cat_3), ref = "1") + #less than high school
+                      race_telomere,
+                    design = srs_design_srvyr_all)
+
+summary(model_10)
+
+model_10a <- svycoxph(Surv(permth_int, mortstat == 1) ~ telomere_kb +
+                        relevel(as.factor(age_grp), ref = "1") +
+                        relevel(as.factor(RIAGENDR), ref = "1") + #male
+                        relevel(as.factor(edu_cat_3), ref = "1"),  #less than high school
+                      
+                      design = srs_design_srvyr_all_1)
+
+summary(model_10a)
+
+model_10b <- svycoxph(Surv(permth_int, mortstat == 1) ~ telomere_kb +
+                        relevel(as.factor(age_grp), ref = "1") +
+                        relevel(as.factor(RIAGENDR), ref = "1") + #male
+                        relevel(as.factor(edu_cat_3), ref = "1"),  #less than high school
+                      
+                      design = srs_design_srvyr_all_2)
+
+summary(model_10b)
+
+model_10c <- svycoxph(Surv(permth_int, mortstat == 1) ~ telomere_kb +
+                        relevel(as.factor(age_grp), ref = "1") +
+                        relevel(as.factor(RIAGENDR), ref = "1") + #male
+                        relevel(as.factor(edu_cat_3), ref = "1"),  #less than high school
+                      
+                      design = srs_design_srvyr_all_3)
+
+summary(model_10c)
+
+table(srs_design_srvyr_all$variables$mortstat, srs_design_srvyr_all$variables$RIDRETH2)
+
+table(srs_design_srvyr_all$variables$telomere_kb_quartile,srs_design_srvyr_all$variables$mortstat, srs_design_srvyr_all$variables$RIDRETH2)
+
+tbl_inter_mod_9 <- tbl_regression(model_9, exponentiate = TRUE, include = c('relevel(as.factor(telomere_kb_quartile), ref = "1")', 'race_telomere'))
+
+tbl_inter_mod_9
+
+tbl_inter_mod_9_1 <-
+  tbl_merge(
+    tbls = list(
+      tbl_regression(model_9a, exponentiate = TRUE, include = c('relevel(as.factor(telomere_kb_quartile), ref = "1")')),
+      tbl_regression(model_9b, exponentiate = TRUE, include = c('relevel(as.factor(telomere_kb_quartile), ref = "1")')),
+      tbl_regression(model_9c, exponentiate = TRUE, include = c('relevel(as.factor(telomere_kb_quartile), ref = "1")'))),
+    tab_spanner = c("**White**", "**Black**", "**Hispanic**"))
+
+tbl_inter_mod_9_1
+
+tbl_inter_mod_10 <- tbl_regression(model_10, exponentiate = TRUE, include = c('telomere_kb', 'race_telomere'))
+
+tbl_inter_mod_10
+
+tbl_inter_mod_10_1 <-
+  tbl_merge(
+    tbls = list(
+      tbl_regression(model_10a, exponentiate = TRUE, include = c('telomere_kb')),
+      tbl_regression(model_10b, exponentiate = TRUE, include = c('telomere_kb')),
+      tbl_regression(model_10c, exponentiate = TRUE, include = c('telomere_kb'))),
+    tab_spanner = c("**White**", "**Black**", "**Hispanic**"))
+
+tbl_inter_mod_10_1
+
+```
+
+```{r interaction regression models with telomere with reverse reference, race and age group, echo=FALSE}
+rev_model_7 <-svycoxph(Surv(permth_int, mortstat == 1) ~  relevel(as.factor(telomere_kb_quartile), ref = "4") +#   + #  # last quartile telomere length telomere_kb_rec #  + #middle 
+                         relevel(as.factor(age_grp), ref = "1") +
+                         relevel(as.factor(RIAGENDR), ref = "1") + #male
+                         relevel(as.factor(RIDRETH2), ref = "1") + #white
+                         relevel(as.factor(edu_cat_3), ref = "1") +  #less than high school
+                         relevel(as.factor(smoking_status), ref = "1") + #never
+                         relevel(as.factor(cvd_status) , ref = "2") +
+                         relevel(as.factor(htn_status) , ref = "2") +
+                         relevel(as.factor(chol_status) , ref = "2") +
+                         relevel(as.factor(diab_status) , ref = "2") +
+                         age_grp_race + race_telomere + age_grp_telomere + age_grp_race_telomere,
+                   design = srs_design_srvyr_demo)
+
+summary(rev_model_7)
+
+rev_model_7a <- svycoxph(Surv(permth_int, mortstat == 1) ~ relevel(as.factor(telomere_kb_quartile), ref = "4") + #middle 
+                           RIDAGEYR +
+                           relevel(as.factor(RIAGENDR), ref = "1") + #male
+                           relevel(as.factor(edu_cat_3), ref = "1"),   #less than high school
+                         design = srs_design_srvyr_all_1_1)
+
+summary(rev_model_7a)
+
+rev_model_7b <- svycoxph(Surv(permth_int, mortstat == 1) ~ relevel(as.factor(telomere_kb_quartile), ref = "4") + #middle 
+                           RIDAGEYR +
+                           relevel(as.factor(RIAGENDR), ref = "1") + #male
+                           relevel(as.factor(edu_cat_3), ref = "1"),  #less than high school
+                         design = srs_design_srvyr_all_1_2)
+
+summary(rev_model_7b)
+
+rev_model_7c <- svycoxph(Surv(permth_int, mortstat == 1) ~ relevel(as.factor(telomere_kb_quartile), ref = "4") + #middle 
+                           RIDAGEYR +
+                           relevel(as.factor(RIAGENDR), ref = "1") + #male
+                           relevel(as.factor(edu_cat_3), ref = "1"),  #less than high school
+                         design = srs_design_srvyr_all_1_3)
+
+summary(rev_model_7c)
+
+rev_model_7d <- svycoxph(Surv(permth_int, mortstat == 1) ~ relevel(as.factor(telomere_kb_quartile), ref = "4") + #middle 
+                           RIDAGEYR +
+                           relevel(as.factor(RIAGENDR), ref = "1") + #male
+                           relevel(as.factor(edu_cat_3), ref = "1"),  #less than high school
+                         design = srs_design_srvyr_all_2_1)
+
+summary(rev_model_7d)
+
+rev_model_7e <- svycoxph(Surv(permth_int, mortstat == 1) ~ relevel(as.factor(telomere_kb_quartile), ref = "4") + #middle 
+                           RIDAGEYR +
+                           relevel(as.factor(RIAGENDR), ref = "1") + #male
+                           relevel(as.factor(edu_cat_3), ref = "1"),  #less than high school
+                         design = srs_design_srvyr_all_2_2)
+
+summary(rev_model_7e)
+
+rev_model_7f <- svycoxph(Surv(permth_int, mortstat == 1) ~ relevel(as.factor(telomere_kb_quartile), ref = "4") + #middle 
+                           RIDAGEYR +
+                           relevel(as.factor(RIAGENDR), ref = "1")+ #male
+                           relevel(as.factor(edu_cat_3), ref = "1"),  #less than high school
+                         design = srs_design_srvyr_all_2_3)
+
+summary(rev_model_7f)
+
+rev_model_7g <- svycoxph(Surv(permth_int, mortstat == 1) ~ relevel(as.factor(telomere_kb_quartile), ref = "4") + #middle 
+                           RIDAGEYR +
+                           relevel(as.factor(RIAGENDR), ref = "1") + #male
+                           relevel(as.factor(edu_cat_3), ref = "1"),  #less than high school
+                         design = srs_design_srvyr_all_3_1)
+
+summary(rev_model_7g)
+
+rev_model_7h <- svycoxph(Surv(permth_int, mortstat == 1) ~ relevel(as.factor(telomere_kb_quartile), ref = "4") + #middle 
+                           RIDAGEYR +
+                           relevel(as.factor(RIAGENDR), ref = "1") + #male
+                           relevel(as.factor(edu_cat_3), ref = "1"),  #less than high school
+                         design = srs_design_srvyr_all_3_2)
+
+summary(rev_model_7h)
+
+rev_model_7i <- svycoxph(Surv(permth_int, mortstat == 1) ~ relevel(as.factor(telomere_kb_quartile), ref = "4") + #middle
+                           RIDAGEYR +
+                           relevel(as.factor(RIAGENDR), ref = "1") + #male
+                           relevel(as.factor(edu_cat_3), ref = "1"),  #less than high school
+                         design = srs_design_srvyr_all_3_3)
+
+summary(rev_model_7i)
+
+rev_model_8 <-svycoxph(Surv(permth_int, mortstat == 1) ~  telomere_kb_rec +
+                         relevel(as.factor(age_grp), ref = "1") +
+                         relevel(as.factor(RIAGENDR), ref = "1") + #male
+                         relevel(as.factor(RIDRETH2), ref = "1") + #white
+                         relevel(as.factor(edu_cat_3), ref = "1") +  #less than high school
+                         age_grp_race +  race_telomere + age_grp_telomere + age_grp_race_telomere,
+                       design = srs_design_srvyr_demo)
+
+summary(rev_model_8)
+
+rev_model_8a <- svycoxph(Surv(permth_int, mortstat == 1) ~ telomere_kb_rec +
+                           relevel(as.factor(RIAGENDR), ref = "1") + #male
+                           relevel(as.factor(edu_cat_3), ref = "1"),  #less than high school
+                         design = srs_design_srvyr_all_1_1)
+
+summary(rev_model_8a)
+
+rev_model_8b <- svycoxph(Surv(permth_int, mortstat == 1) ~ telomere_kb_rec +
+                           relevel(as.factor(RIAGENDR), ref = "1") + #male
+                           relevel(as.factor(edu_cat_3), ref = "1"),  #less than high school
+                         
+                         design = srs_design_srvyr_all_1_2)
+
+summary(rev_model_8b)
+
+rev_model_8c <- svycoxph(Surv(permth_int, mortstat == 1) ~ telomere_kb_rec +
+                           relevel(as.factor(RIAGENDR), ref = "1") + #male
+                           relevel(as.factor(edu_cat_3), ref = "1"),  #less than high school
+                         
+                         design = srs_design_srvyr_all_1_3)
+
+summary(rev_model_8c)
+
+rev_model_8d <- svycoxph(Surv(permth_int, mortstat == 1) ~ telomere_kb_rec +
+                           relevel(as.factor(RIAGENDR), ref = "1") + #male
+                           relevel(as.factor(edu_cat_3), ref = "1"),  #less than high school
+                         
+                         design = srs_design_srvyr_all_2_1)
+
+summary(rev_model_8d)
+
+rev_model_8e <- svycoxph(Surv(permth_int, mortstat == 1) ~ telomere_kb_rec +
+                           relevel(as.factor(RIAGENDR), ref = "1") + #male
+                           relevel(as.factor(edu_cat_3), ref = "1"),  #less than high school
+                         
+                         design = srs_design_srvyr_all_2_2)
+
+summary(rev_model_8e)
+
+rev_model_8f <- svycoxph(Surv(permth_int, mortstat == 1) ~ telomere_kb_rec +
+                           relevel(as.factor(RIAGENDR), ref = "1") + #male
+                           relevel(as.factor(edu_cat_3), ref = "1"),  #less than high school
+                         
+                         design = srs_design_srvyr_all_2_3)
+
+summary(rev_model_8f)
+
+rev_model_8g <- svycoxph(Surv(permth_int, mortstat == 1) ~ telomere_kb_rec +
+                           relevel(as.factor(RIAGENDR), ref = "1") + #male
+                           relevel(as.factor(edu_cat_3), ref = "1"),  #less than high school
+                         
+                         design = srs_design_srvyr_all_3_1)
+
+summary(rev_model_8g)
+
+rev_model_8h <- svycoxph(Surv(permth_int, mortstat == 1) ~ telomere_kb_rec +
+                           relevel(as.factor(RIAGENDR), ref = "1") + #male
+                           relevel(as.factor(edu_cat_3), ref = "1"),  #less than high school
+                         
+                         design = srs_design_srvyr_all_3_2)
+
+summary(rev_model_8h)
+
+rev_model_8i <- svycoxph(Surv(permth_int, mortstat == 1) ~ telomere_kb_rec +
+                           relevel(as.factor(RIAGENDR), ref = "1") + #male
+                           relevel(as.factor(edu_cat_3), ref = "1"),  #less than high school
+                         
+                         design = srs_design_srvyr_all_3_3)
+
+summary(rev_model_8i)
+
+table(srs_design_srvyr_all$variables$age_grp,srs_design_srvyr_all$variables$mortstat, srs_design_srvyr_all$variables$RIDRETH2)
+
+table( srs_design_srvyr_all$variables$telomere_kb_quartile,srs_design_srvyr_all$variables$mortstat , srs_design_srvyr_all$variables$age_grp, srs_design_srvyr_all$variables$RIDRETH2)
+
+tbl_inter_rev_mod_7 <- tbl_regression(rev_model_7, exponentiate = TRUE, include = c('relevel(as.factor(telomere_kb_quartile), ref = "4")', 'age_grp_race', 'race_telomere', 'age_grp_telomere', 'age_grp_race_telomere'))
+
+tbl_inter_rev_mod_7
+
+tbl_inter_rev_mod_7_1 <-
+  tbl_merge(
+    tbls = list(
+      tbl_regression(rev_model_7a, exponentiate = TRUE, include = c('relevel(as.factor(telomere_kb_quartile), ref = "4")')),
+      tbl_regression(rev_model_7b, exponentiate = TRUE, include = c('relevel(as.factor(telomere_kb_quartile), ref = "4")')),
+      tbl_regression(rev_model_7c, exponentiate = TRUE, include = c('relevel(as.factor(telomere_kb_quartile), ref = "4")'))),
+    tab_spanner = c("**Young-White**", "**Young-Black**", "**Young-Hispanic**"))
+
+tbl_inter_rev_mod_7_1
+
+tbl_inter_rev_mod_7_2 <-
+  tbl_merge(
+    tbls = list(
+      tbl_regression(rev_model_7d, exponentiate = TRUE, include = c('relevel(as.factor(telomere_kb_quartile), ref = "4")')),
+      tbl_regression(rev_model_7e, exponentiate = TRUE, include = c('relevel(as.factor(telomere_kb_quartile), ref = "4")')),
+      tbl_regression(rev_model_7f, exponentiate = TRUE, include = c('relevel(as.factor(telomere_kb_quartile), ref = "4")'))),
+    tab_spanner = c("**Middle-White**", "**Middle-Black**", "**Middle-HIspanic**"))
+
+tbl_inter_rev_mod_7_2
+
+tbl_inter_rev_mod_7_3 <-
+  tbl_merge(
+    tbls = list(
+      tbl_regression(rev_model_7g, exponentiate = TRUE, include = c('relevel(as.factor(telomere_kb_quartile), ref = "4")')),
+      tbl_regression(rev_model_7h, exponentiate = TRUE, include = c('relevel(as.factor(telomere_kb_quartile), ref = "4")')),
+      tbl_regression(rev_model_7i, exponentiate = TRUE, include = c('relevel(as.factor(telomere_kb_quartile), ref = "4")'))),
+    tab_spanner = c("**Old-White**", "**Old-Black**", "**Old-HIspanic**"))
+
+tbl_inter_rev_mod_7_3
+
+# List of rev_model names
+rev_model_names <- c("rev_model_7a", "rev_model_7b", "rev_model_7c", "rev_model_7d", "rev_model_7e", "rev_model_7f", "rev_model_7g", "rev_model_7h", "rev_model_7i")
+
+# Create an empty list to store the resulting tables
+tbl_list <- list()
+
+# Loop through each rev_model
+for (rev_model_name in rev_model_names) {
+  # Generate the table for the current rev_model
+  tbl <- tbl_regression(
+    eval(parse(text = rev_model_name)),  # Evaluate the rev_model object dynamically
+    exponentiate = TRUE,
+    include = c('relevel(as.factor(telomere_kb_quartile), ref = "4")')
+  )
+  
+  # Add the table to the list with a custom name
+  tbl_list[[rev_model_name]] <- tbl
+}
+
+# Merge the tables using tbl_merge and provide appropriate spanners
+tbl_merged <- tbl_merge(tbls = tbl_list, tab_spanner = rev_model_names)
+
+# Print the merged table
+tbl_merged
+
+
+tbl_inter_rev_mod_8 <- tbl_regression(rev_model_8, exponentiate = TRUE, include = c('telomere_kb_rec', 'age_grp_race', 'race_telomere', 'age_grp_telomere', 'age_grp_race_telomere'))
+
+tbl_inter_rev_mod_8
+
+tbl_inter_rev_mod_8_1 <-
+  tbl_merge(
+    tbls = list(
+      tbl_regression(rev_model_8a, exponentiate = TRUE, include = c(telomere_kb_rec)),
+      tbl_regression(rev_model_8b, exponentiate = TRUE, include = c(telomere_kb_rec)),
+      tbl_regression(rev_model_8c, exponentiate = TRUE, include = c(telomere_kb_rec))),
+    tab_spanner = c("**Young-White**", "**Young-Black**", "**Young-Hispanic**"))
+
+tbl_inter_rev_mod_8_1
+
+tbl_inter_rev_mod_8_2 <-
+  tbl_merge(
+    tbls = list(
+      tbl_regression(rev_model_8d, exponentiate = TRUE, include = c(telomere_kb_rec)),
+      tbl_regression(rev_model_8e, exponentiate = TRUE, include = c(telomere_kb_rec)),
+      tbl_regression(rev_model_8f, exponentiate = TRUE, include = c(telomere_kb_rec))),
+    tab_spanner = c("**Middle-White**", "**Middle-Black**", "**Middle-HIspanic**"))
+
+tbl_inter_rev_mod_8_2
+
+tbl_inter_rev_mod_8_3 <-
+  tbl_merge(
+    tbls = list(
+      tbl_regression(rev_model_8g, exponentiate = TRUE, include = c(telomere_kb_rec)),
+      tbl_regression(rev_model_8h, exponentiate = TRUE, include = c(telomere_kb_rec)),
+      tbl_regression(rev_model_8i, exponentiate = TRUE, include = c(telomere_kb_rec))),
+    tab_spanner = c("**Old-White**", "**Old-Black**", "**Old-HIspanic**"))
+
+tbl_inter_rev_mod_8_3
+```
+
+```{r interaction regression rev_models with reverse reference with race, echo=FALSE}
+srs_design_srvyr_all_1 <- analysis_data_2 %>% 
+  as_survey_design(id = SDMVPSU, strata = SDMVSTRA, weights = WTMEC4YR, nest = TRUE) %>% 
+  filter(data_status_all == 1 & RIDRETH2 ==1)
+
+srs_design_srvyr_all_2 <- analysis_data_2 %>% 
+  as_survey_design(id = SDMVPSU, strata = SDMVSTRA, weights = WTMEC4YR, nest = TRUE) %>% 
+  filter(data_status_all == 1 & RIDRETH2 ==2) 
+
+srs_design_srvyr_all_3 <- analysis_data_2 %>% 
+  as_survey_design(id = SDMVPSU, strata = SDMVSTRA, weights = WTMEC4YR, nest = TRUE) %>% 
+  filter(data_status_all == 1 & RIDRETH2 ==3) 
+
+rev_model_9 <-svycoxph(Surv(permth_int, mortstat == 1) ~  relevel(as.factor(telomere_kb_quartile), ref = "4") +#   + #  # last quartile telomere length telomere_kb_rec #  + #middle 
+                         relevel(as.factor(age_grp), ref = "1") +
+                         relevel(as.factor(RIAGENDR), ref = "1") + #male
+                         relevel(as.factor(RIDRETH2), ref = "1") + #white
+                         relevel(as.factor(edu_cat_3), ref = "1") +  #less than high school
+                         
+                         race_telomere,
+                       design = srs_design_srvyr_all)
+
+summary(rev_model_9)
+
+rev_model_9a <- svycoxph(Surv(permth_int, mortstat == 1) ~ relevel(as.factor(telomere_kb_quartile), ref = "4") + #middle 
+                           relevel(as.factor(age_grp), ref = "1") +
+                           relevel(as.factor(RIAGENDR), ref = "1") + #male
+                           relevel(as.factor(edu_cat_3), ref = "1"),  #less than high school
+                         
+                         design = srs_design_srvyr_all_1)
+
+summary(rev_model_9a)
+
+rev_model_9b <- svycoxph(Surv(permth_int, mortstat == 1) ~ relevel(as.factor(telomere_kb_quartile), ref = "4") + #middle 
+                           relevel(as.factor(age_grp), ref = "1") +
+                           relevel(as.factor(RIAGENDR), ref = "1") + #male
+                           relevel(as.factor(edu_cat_3), ref = "1"),  #less than high school
+                         
+                         design = srs_design_srvyr_all_2)
+
+summary(rev_model_9b)
+
+rev_model_9c <- svycoxph(Surv(permth_int, mortstat == 1) ~ relevel(as.factor(telomere_kb_quartile), ref = "4") + #middle 
+                           relevel(as.factor(age_grp), ref = "1") +
+                           relevel(as.factor(RIAGENDR), ref = "1") + #male
+                           relevel(as.factor(edu_cat_3), ref = "1"),  #less than high school
+                         
+                         design = srs_design_srvyr_all_3)
+
+summary(rev_model_9c)
+
+
+rev_model_10 <-svycoxph(Surv(permth_int, mortstat == 1) ~  telomere_kb_rec +
+                          relevel(as.factor(age_grp), ref = "1") +
+                          relevel(as.factor(RIAGENDR), ref = "1") + #male
+                          relevel(as.factor(RIDRETH2), ref = "1") + #white
+                          relevel(as.factor(edu_cat_3), ref = "1") + #less than high school
+                          race_telomere,
+                        design = srs_design_srvyr_all)
+
+summary(rev_model_10)
+
+rev_model_10a <- svycoxph(Surv(permth_int, mortstat == 1) ~ telomere_kb_rec +
+                            relevel(as.factor(age_grp), ref = "1") +
+                            relevel(as.factor(RIAGENDR), ref = "1") + #male
+                            relevel(as.factor(edu_cat_3), ref = "1"),  #less than high school
+                          
+                          design = srs_design_srvyr_all_1)
+
+summary(rev_model_10a)
+
+rev_model_10b <- svycoxph(Surv(permth_int, mortstat == 1) ~ telomere_kb_rec +
+                            relevel(as.factor(age_grp), ref = "1") +
+                            relevel(as.factor(RIAGENDR), ref = "1") + #male
+                            relevel(as.factor(edu_cat_3), ref = "1"),  #less than high school
+                          
+                          design = srs_design_srvyr_all_2)
+
+summary(rev_model_10b)
+
+rev_model_10c <- svycoxph(Surv(permth_int, mortstat == 1) ~ telomere_kb_rec +
+                            relevel(as.factor(age_grp), ref = "1") +
+                            relevel(as.factor(RIAGENDR), ref = "1") + #male
+                            relevel(as.factor(edu_cat_3), ref = "1"),  #less than high school
+                          
+                          design = srs_design_srvyr_all_3)
+
+summary(rev_model_10c)
+
+table(srs_design_srvyr_all$variables$mortstat, srs_design_srvyr_all$variables$RIDRETH2)
+
+table(srs_design_srvyr_all$variables$telomere_kb_quartile,srs_design_srvyr_all$variables$mortstat, srs_design_srvyr_all$variables$RIDRETH2)
+
+tbl_inter_rev_mod_9 <- tbl_regression(rev_model_9, exponentiate = TRUE, include = c('relevel(as.factor(telomere_kb_quartile), ref = "4")', 'race_telomere'))
+
+tbl_inter_rev_mod_9
+
+tbl_inter_rev_mod_9_1 <-
+  tbl_merge(
+    tbls = list(
+      tbl_regression(rev_model_9a, exponentiate = TRUE, include = c('relevel(as.factor(telomere_kb_quartile), ref = "4")')),
+      tbl_regression(rev_model_9b, exponentiate = TRUE, include = c('relevel(as.factor(telomere_kb_quartile), ref = "4")')),
+      tbl_regression(rev_model_9c, exponentiate = TRUE, include = c('relevel(as.factor(telomere_kb_quartile), ref = "4")'))),
+    tab_spanner = c("**White**", "**Black**", "**Hispanic**"))
+
+tbl_inter_rev_mod_9_1
+
+tbl_inter_rev_mod_10 <- tbl_regression(rev_model_10, exponentiate = TRUE, include = c('telomere_kb_rec', 'race_telomere'))
+
+tbl_inter_rev_mod_10
+
+tbl_inter_rev_mod_10_1 <-
+  tbl_merge(
+    tbls = list(
+      tbl_regression(rev_model_10a, exponentiate = TRUE, include = c('telomere_kb_rec')),
+      tbl_regression(rev_model_10b, exponentiate = TRUE, include = c('telomere_kb_rec')),
+      tbl_regression(rev_model_10c, exponentiate = TRUE, include = c('telomere_kb_rec'))),
+    tab_spanner = c("**White**", "**Black**", "**Hispanic**"))
+
+tbl_inter_rev_mod_10_1
+summary(rev_model_9)
+```
+
+```{r sensitivity analysis, echo=FALSE}
+#https://rstudio-pubs-static.s3.amazonaws.com/316608_ce1f6a723cff4b7d8ec65676779b12c6.html
+
+analysis_data_3 <- analysis_data_2 %>% 
+  mutate(permth_36 = 36,
+         lt_censoring = if_else(permth_36 > permth_int, 1, 0),
+         permth_int2 = ifelse(lt_censoring == 1, (permth_int +36), permth_int)) 
+#%>%  select(SEQN, mortstat, lt_censoring, permth_int, permth_36, permth_int2)
+
+srs_design_srvyr_all_rec <- analysis_data_3 %>% 
+  as_survey_design(id = SDMVPSU, strata = SDMVSTRA, weights = WTMEC4YR, nest = TRUE) %>% 
+  filter(data_status_all == 1) %>% 
+  mutate(sex_telomere = as.numeric(RIAGENDR) * as.numeric(telomere_kb_quartile),
+         race_telomere = as.numeric(RIDRETH2) * as.numeric(telomere_kb_quartile),
+         educ_telomere = as.numeric(edu_cat_3) * as.numeric(telomere_kb_quartile),
+         age_grp_race = as.numeric(age_grp)* as.numeric(RIDRETH2),
+         age_grp_telomere = as.numeric(age_grp) * as.numeric(telomere_kb_quartile),
+         age_grp_race_telomere = as.numeric(age_grp) * as.numeric(telomere_kb_quartile)* as.numeric(RIDRETH2))
+
+
+#Surv(time = srs_design_srvyr_all$starttime, time2 = srs_design_srvyr_all$permth_int, event = (srs_design_srvyr_all$mortstat=1))
+
+#fitl1<-svycoxph(Surv(time = starttime, time2=permth_int, event = (mortstat==1))~telomere_kb, design=srs_design_srvyr_all)
+
+#summary(fitl1)
+
+model_11a <-svycoxph(Surv(time = permth_36, time2=permth_int, event = (mortstat==1)) ~ telomere_kb, 
+                    design=srs_design_srvyr_all_rec)
+
+summary(model_11a)
+
+model_11b <-svycoxph(Surv(time = permth_36, time2=permth_int, event = (mortstat==1)) ~ telomere_kb +
+                       relevel(as.factor(age_grp), ref = "1") +
+                       relevel(as.factor(RIAGENDR), ref = "1") + #male
+                       relevel(as.factor(RIDRETH2), ref = "1") + #white
+                       relevel(as.factor(edu_cat_3), ref = "1") ,#less than high school
+                     design=srs_design_srvyr_all_rec)
+
+summary(model_11b)
+
+model_11c <-svycoxph(Surv(time = permth_36, time2=permth_int, event = (mortstat==1)) ~ telomere_kb +
+                       relevel(as.factor(age_grp), ref = "1") +
+                       relevel(as.factor(RIAGENDR), ref = "1") + #male
+                       relevel(as.factor(RIDRETH2), ref = "1") + #white
+                       relevel(as.factor(edu_cat_3), ref = "1") + #less than high school
+                       relevel(as.factor(smoking_status), ref = "1") + #never
+                       relevel(as.factor(cvd_status) , ref = "2") +
+                       relevel(as.factor(htn_status) , ref = "2") +
+                       relevel(as.factor(chol_status) , ref = "2") +
+                       relevel(as.factor(diab_status) , ref = "2"),
+                     design = srs_design_srvyr_all_rec)
+
+summary(model_11c)
+
+
+model_12a <-svycoxph(Surv(time = permth_36, time2=permth_int2, event = (mortstat==1)) ~ telomere_kb + lt_censoring, 
+                    design=srs_design_srvyr_all_rec)
+
+summary(model_12a)
+
+model_12b <-svycoxph(Surv(time = permth_36, time2=permth_int2, event = (mortstat==1)) ~ telomere_kb + lt_censoring +
+                       relevel(as.factor(age_grp), ref = "1") +
+                       relevel(as.factor(RIAGENDR), ref = "1") + #male
+                       relevel(as.factor(RIDRETH2), ref = "1") + #white
+                       relevel(as.factor(edu_cat_3), ref = "1") ,#less than high school
+                     design=srs_design_srvyr_all_rec)
+
+summary(model_12b)
+
+
+model_12c <-svycoxph(Surv(time = permth_36, time2=permth_int2, event = (mortstat==1)) ~ telomere_kb + lt_censoring +
+                       relevel(as.factor(age_grp), ref = "1") +
+                       relevel(as.factor(RIAGENDR), ref = "1") + #male
+                       relevel(as.factor(RIDRETH2), ref = "1") + #white
+                       relevel(as.factor(edu_cat_3), ref = "1") + #less than high school
+                       relevel(as.factor(smoking_status), ref = "1") + #never
+                       relevel(as.factor(cvd_status) , ref = "2") +
+                       relevel(as.factor(htn_status) , ref = "2") +
+                       relevel(as.factor(chol_status) , ref = "2") +
+                       relevel(as.factor(diab_status) , ref = "2"),
+                     design = srs_design_srvyr_all_rec)
+
+summary(model_12c)
+
+
+#telomere categorical model
+model_13a <-svycoxph(Surv(time = permth_36, time2=permth_int, mortstat == 1) ~ relevel(as.factor(telomere_kb_quartile), ref = "1"), 
+                    design = srs_design_srvyr_all_rec)
+
+summary(model_13a)
+
+model_13b <-svycoxph(Surv(time = permth_36, time2=permth_int, mortstat == 1) ~ relevel(as.factor(telomere_kb_quartile), ref = "1") +#   + #  # last quartile telomere length telomere_kb #  + #middle  
+                      relevel(as.factor(age_grp), ref = "1") + #young
+                      relevel(as.factor(RIAGENDR), ref = "1") + #male
+                      relevel(as.factor(RIDRETH2), ref = "1") + #white
+                      relevel(as.factor(edu_cat_3), ref = "1"), #less than high school
+                    design = srs_design_srvyr_all_rec)
+
+summary(model_13b)
+
+model_13c <-svycoxph(Surv(time = permth_36, time2=permth_int, mortstat == 1) ~ relevel(as.factor(telomere_kb_quartile), ref = "1") +#   + #  # last quartile telomere length telomere_kb #  + #middle  
+                      relevel(as.factor(age_grp), ref = "1") +
+                      relevel(as.factor(RIAGENDR), ref = "1") + #male
+                      relevel(as.factor(RIDRETH2), ref = "1") + #white
+                      relevel(as.factor(edu_cat_3), ref = "1") + #less than high school
+                      relevel(as.factor(smoking_status), ref = "1") + #never
+                      relevel(as.factor(cvd_status) , ref = "2") +
+                      relevel(as.factor(htn_status) , ref = "2") +
+                      relevel(as.factor(chol_status) , ref = "2") +
+                      relevel(as.factor(diab_status) , ref = "2"),
+                    design = srs_design_srvyr_all_rec)
+
+summary(model_13c)
+
+
+#telomere categorical model
+model_14a <-svycoxph(Surv(time = permth_36, time2=permth_int2, mortstat == 1) ~ relevel(as.factor(telomere_kb_quartile), ref = "1") + lt_censoring, 
+                    design = srs_design_srvyr_all_rec)
+
+summary(model_14a)
+
+model_14b <-svycoxph(Surv(time = permth_36, time2=permth_int2, mortstat == 1) ~ relevel(as.factor(telomere_kb_quartile), ref = "1")+ lt_censoring +#   + #  # last quartile telomere length telomere_kb #  + #middle  
+                      relevel(as.factor(age_grp), ref = "1") + #young
+                      relevel(as.factor(RIAGENDR), ref = "1") + #male
+                      relevel(as.factor(RIDRETH2), ref = "1") + #white
+                      relevel(as.factor(edu_cat_3), ref = "1"), #less than high school
+                    design = srs_design_srvyr_all_rec)
+
+summary(model_14b)
+
+model_14c <-svycoxph(Surv(time = permth_36, time2=permth_int2, mortstat == 1) ~ relevel(as.factor(telomere_kb_quartile), ref = "1") + lt_censoring+#   + #  # last quartile telomere length telomere_kb #  + #middle  
+                      relevel(as.factor(age_grp), ref = "1") +
+                      relevel(as.factor(RIAGENDR), ref = "1") + #male
+                      relevel(as.factor(RIDRETH2), ref = "1") + #white
+                      relevel(as.factor(edu_cat_3), ref = "1") + #less than high school
+                      relevel(as.factor(smoking_status), ref = "1") + #never
+                      relevel(as.factor(cvd_status) , ref = "2") +
+                      relevel(as.factor(htn_status) , ref = "2") +
+                      relevel(as.factor(chol_status) , ref = "2") +
+                      relevel(as.factor(diab_status) , ref = "2"),
+                    design = srs_design_srvyr_all_rec)
+
+summary(model_13c)
+
+
+tbl_merge_mod_12_1 <-
+  tbl_merge(
+    tbls = list(
+      tbl_regression(model_1a, exponentiate = TRUE, include = c('telomere_kb')),
+      tbl_regression(model_11a, exponentiate = TRUE, include = c('telomere_kb')),
+      tbl_regression(model_12a, exponentiate = TRUE, include = c('telomere_kb'))),
+    tab_spanner = c("**unadj**", "**unadj2**", "**unadj3**"))
+
+tbl_merge_mod_12_1
+
+tbl_merge_mod_12_2 <-
+  tbl_merge(
+    tbls = list(
+      tbl_regression(model_1b, exponentiate = TRUE, include = c('telomere_kb')),
+      tbl_regression(model_11b, exponentiate = TRUE, include = c('telomere_kb')),
+      tbl_regression(model_12b, exponentiate = TRUE, include = c('telomere_kb'))),
+    tab_spanner = c("**adj**", "**adj2**", "**adj3**"))
+
+tbl_merge_mod_12_2
+
+tbl_merge_mod_12_3 <-
+  tbl_merge(
+    tbls = list(
+      tbl_regression(model_1c, exponentiate = TRUE, include = c('telomere_kb')),
+      tbl_regression(model_11c, exponentiate = TRUE, include = c('telomere_kb')),
+      tbl_regression(model_12c, exponentiate = TRUE, include = c('telomere_kb'))),
+    tab_spanner = c("**adj**", "**adj2**", "**adj3**"))
+
+tbl_merge_mod_12_3
+
+tbl_merge_mod_14_1 <-
+  tbl_merge(
+    tbls = list(
+      tbl_regression(model_2a, exponentiate = TRUE, include = c('relevel(as.factor(telomere_kb_quartile), ref = "1")')),
+      tbl_regression(model_13a, exponentiate = TRUE, include = c('relevel(as.factor(telomere_kb_quartile), ref = "1")')),
+      tbl_regression(model_14a, exponentiate = TRUE, include = c('relevel(as.factor(telomere_kb_quartile), ref = "1")'))),
+    tab_spanner = c("**unadj**", "**unadj2**", "**unadj3**"))
+
+tbl_merge_mod_14_1
+
+tbl_merge_mod_14_2 <-
+  tbl_merge(
+    tbls = list(
+      tbl_regression(model_2b, exponentiate = TRUE, include = c('relevel(as.factor(telomere_kb_quartile), ref = "1")')),
+      tbl_regression(model_13b, exponentiate = TRUE, include = c('relevel(as.factor(telomere_kb_quartile), ref = "1")')),
+      tbl_regression(model_14b, exponentiate = TRUE, include = c('relevel(as.factor(telomere_kb_quartile), ref = "1")'))),
+    tab_spanner = c("**adj**", "**adj2**", "**adj3**"))
+
+tbl_merge_mod_14_2
+
+tbl_merge_mod_14_3 <-
+  tbl_merge(
+    tbls = list(
+      tbl_regression(model_2c, exponentiate = TRUE, include = c('relevel(as.factor(telomere_kb_quartile), ref = "1")')),
+      tbl_regression(model_13c, exponentiate = TRUE, include = c('relevel(as.factor(telomere_kb_quartile), ref = "1")')),
+      tbl_regression(model_14c, exponentiate = TRUE, include = c('relevel(as.factor(telomere_kb_quartile), ref = "1")'))),
+    tab_spanner = c("**adj**", "**adj2**", "**adj3**"))
+
+tbl_merge_mod_14_3
+```
+
+```{r sensitivity analysis with reverse reference, echo=FALSE}
+#https://rstudio-pubs-static.s3.amazonaws.com/316608_ce1f6a723cff4b7d8ec65676779b12c6.html
+
+analysis_data_3 <- analysis_data_2 %>% 
+  mutate(permth_36 = 36,
+         lt_censoring = if_else(permth_36 > permth_int, 1, 0),
+         permth_int2 = ifelse(lt_censoring == 1, (permth_int +36), permth_int)) 
+#%>%  select(SEQN, mortstat, lt_censoring, permth_int, permth_36, permth_int2)
+
+srs_design_srvyr_all_rec <- analysis_data_3 %>% 
+  as_survey_design(id = SDMVPSU, strata = SDMVSTRA, weights = WTMEC4YR, nest = TRUE) %>% 
+  filter(data_status_all == 1) %>% 
+  mutate(sex_telomere = as.numeric(RIAGENDR) * as.numeric(telomere_kb_quartile),
+         race_telomere = as.numeric(RIDRETH2) * as.numeric(telomere_kb_quartile),
+         educ_telomere = as.numeric(edu_cat_3) * as.numeric(telomere_kb_quartile),
+         age_grp_race = as.numeric(age_grp)* as.numeric(RIDRETH2),
+         age_grp_telomere = as.numeric(age_grp) * as.numeric(telomere_kb_quartile),
+         age_grp_race_telomere = as.numeric(age_grp) * as.numeric(telomere_kb_quartile)* as.numeric(RIDRETH2))
+
+
+#Surv(time = srs_design_srvyr_all$starttime, time2 = srs_design_srvyr_all$permth_int, event = (srs_design_srvyr_all$mortstat=1))
+
+#fitl1<-svycoxph(Surv(time = starttime, time2=permth_int, event = (mortstat==1))~telomere_kb, design=srs_design_srvyr_all)
+
+#summary(fitl1)
+
+model_15a <-svycoxph(Surv(time = permth_36, time2=permth_int, event = (mortstat==1)) ~ telomere_kb_rec, 
+                     design=srs_design_srvyr_all_rec)
+
+summary(model_15a)
+
+model_15b <-svycoxph(Surv(time = permth_36, time2=permth_int, event = (mortstat==1)) ~ telomere_kb_rec +
+                       relevel(as.factor(age_grp), ref = "1") +
+                       relevel(as.factor(RIAGENDR), ref = "1") + #male
+                       relevel(as.factor(RIDRETH2), ref = "1") + #white
+                       relevel(as.factor(edu_cat_3), ref = "1") ,#less than high school
+                     design=srs_design_srvyr_all_rec)
+
+summary(model_15b)
+
+model_15c <-svycoxph(Surv(time = permth_36, time2=permth_int, event = (mortstat==1)) ~ telomere_kb_rec +
+                       relevel(as.factor(age_grp), ref = "1") +
+                       relevel(as.factor(RIAGENDR), ref = "1") + #male
+                       relevel(as.factor(RIDRETH2), ref = "1") + #white
+                       relevel(as.factor(edu_cat_3), ref = "1") + #less than high school
+                       relevel(as.factor(smoking_status), ref = "1") + #never
+                       relevel(as.factor(cvd_status) , ref = "2") +
+                       relevel(as.factor(htn_status) , ref = "2") +
+                       relevel(as.factor(chol_status) , ref = "2") +
+                       relevel(as.factor(diab_status) , ref = "2"),
+                     design = srs_design_srvyr_all_rec)
+
+summary(model_15c)
+
+
+model_16a <-svycoxph(Surv(time = permth_36, time2=permth_int2, event = (mortstat==1)) ~ telomere_kb_rec + relevel(as.factor(lt_censoring), ref = "0"), 
+                     design=srs_design_srvyr_all_rec)
+
+summary(model_16a)
+
+model_16b <-svycoxph(Surv(time = permth_36, time2=permth_int2, event = (mortstat==1)) ~ telomere_kb_rec + relevel(as.factor(lt_censoring), ref = "0") +
+                       relevel(as.factor(age_grp), ref = "1") +
+                       relevel(as.factor(RIAGENDR), ref = "1") + #male
+                       relevel(as.factor(RIDRETH2), ref = "1") + #white
+                       relevel(as.factor(edu_cat_3), ref = "1") ,#less than high school
+                     design=srs_design_srvyr_all_rec)
+
+summary(model_16b)
+
+
+model_16c <-svycoxph(Surv(time = permth_36, time2=permth_int2, event = (mortstat==1)) ~ telomere_kb_rec + relevel(as.factor(lt_censoring), ref = "0") +
+                       relevel(as.factor(age_grp), ref = "1") +
+                       relevel(as.factor(RIAGENDR), ref = "1") + #male
+                       relevel(as.factor(RIDRETH2), ref = "1") + #white
+                       relevel(as.factor(edu_cat_3), ref = "1") + #less than high school
+                       relevel(as.factor(smoking_status), ref = "1") + #never
+                       relevel(as.factor(cvd_status) , ref = "2") +
+                       relevel(as.factor(htn_status) , ref = "2") +
+                       relevel(as.factor(chol_status) , ref = "2") +
+                       relevel(as.factor(diab_status) , ref = "2"),
+                     design = srs_design_srvyr_all_rec)
+
+summary(model_16c)
+
+
+tbl_merge_mod_16_1 <-
+  tbl_merge(
+    tbls = list(
+      tbl_regression(rev_model_1a, exponentiate = TRUE, include = c('telomere_kb_rec')),
+      tbl_regression(model_15a, exponentiate = TRUE, include = c('telomere_kb_rec')),
+      tbl_regression(model_16a, exponentiate = TRUE, include = c('telomere_kb_rec'))),
+    tab_spanner = c("**unadj**", "**unadj2**", "**unadj3**"))
+
+tbl_merge_mod_16_1
+
+tbl_merge_mod_16_2 <-
+  tbl_merge(
+    tbls = list(
+      tbl_regression(rev_model_1b, exponentiate = TRUE, include = c('telomere_kb_rec')),
+      tbl_regression(model_15b, exponentiate = TRUE, include = c('telomere_kb_rec')),
+      tbl_regression(model_16b, exponentiate = TRUE, include = c('telomere_kb_rec'))),
+    tab_spanner = c("**adj**", "**adj2**", "**adj3**"))
+
+tbl_merge_mod_16_2
+
+tbl_merge_mod_16_3 <-
+  tbl_merge(
+    tbls = list(
+      tbl_regression(rev_model_1c, exponentiate = TRUE, include = c('telomere_kb_rec')),
+      tbl_regression(model_15c, exponentiate = TRUE, include = c('telomere_kb_rec')),
+      tbl_regression(model_16c, exponentiate = TRUE, include = c('telomere_kb_rec'))),
+    tab_spanner = c("**adj**", "**adj2**", "**adj3**"))
+
+tbl_merge_mod_16_3
+
+
+#telomere categorical model
+model_17a <-svycoxph(Surv(time = permth_36, time2=permth_int, mortstat == 1) ~ relevel(as.factor(telomere_kb_quartile), ref = "4"), 
+                     design = srs_design_srvyr_all_rec)
+
+summary(model_17a)
+
+model_17b <-svycoxph(Surv(time = permth_36, time2=permth_int, mortstat == 1) ~ relevel(as.factor(telomere_kb_quartile), ref = "4") +#   + #  # last quartile telomere length telomere_kb #  + #middle  
+                       relevel(as.factor(age_grp), ref = "1") + #young
+                       relevel(as.factor(RIAGENDR), ref = "1") + #male
+                       relevel(as.factor(RIDRETH2), ref = "1") + #white
+                       relevel(as.factor(edu_cat_3), ref = "1"), #less than high school
+                     design = srs_design_srvyr_all_rec)
+
+summary(model_17b)
+
+model_17c <-svycoxph(Surv(time = permth_36, time2=permth_int, mortstat == 1) ~ relevel(as.factor(telomere_kb_quartile), ref = "4") +#   + #  # last quartile telomere length telomere_kb #  + #middle  
+                       relevel(as.factor(age_grp), ref = "1") +
+                       relevel(as.factor(RIAGENDR), ref = "1") + #male
+                       relevel(as.factor(RIDRETH2), ref = "1") + #white
+                       relevel(as.factor(edu_cat_3), ref = "1") + #less than high school
+                       relevel(as.factor(smoking_status), ref = "1") + #never
+                       relevel(as.factor(cvd_status) , ref = "2") +
+                       relevel(as.factor(htn_status) , ref = "2") +
+                       relevel(as.factor(chol_status) , ref = "2") +
+                       relevel(as.factor(diab_status) , ref = "2"),
+                     design = srs_design_srvyr_all_rec)
+
+summary(model_17c)
+
+
+#telomere categorical model
+model_18a <-svycoxph(Surv(time = permth_36, time2=permth_int2, mortstat == 1) ~ relevel(as.factor(telomere_kb_quartile), ref = "4") + relevel(as.factor(lt_censoring), ref = "0"), 
+                     design = srs_design_srvyr_all_rec)
+
+summary(model_18a)
+
+model_18b <-svycoxph(Surv(time = permth_36, time2=permth_int2, mortstat == 1) ~ relevel(as.factor(telomere_kb_quartile), ref = "4") + relevel(as.factor(lt_censoring), ref = "0") +#   + #  # last quartile telomere length telomere_kb #  + #middle  
+                       relevel(as.factor(age_grp), ref = "1") + #young
+                       relevel(as.factor(RIAGENDR), ref = "1") + #male
+                       relevel(as.factor(RIDRETH2), ref = "1") + #white
+                       relevel(as.factor(edu_cat_3), ref = "1"), #less than high school
+                     design = srs_design_srvyr_all_rec)
+
+summary(model_18b)
+
+model_18c <-svycoxph(Surv(time = permth_36, time2=permth_int2, mortstat == 1) ~ relevel(as.factor(telomere_kb_quartile), ref = "4") + relevel(as.factor(lt_censoring), ref = "0") +#   + #  # last quartile telomere length telomere_kb #  + #middle  
+                       relevel(as.factor(age_grp), ref = "1") +
+                       relevel(as.factor(RIAGENDR), ref = "1") + #male
+                       relevel(as.factor(RIDRETH2), ref = "1") + #white
+                       relevel(as.factor(edu_cat_3), ref = "1") + #less than high school
+                       relevel(as.factor(smoking_status), ref = "1") + #never
+                       relevel(as.factor(cvd_status) , ref = "2") +
+                       relevel(as.factor(htn_status) , ref = "2") +
+                       relevel(as.factor(chol_status) , ref = "2") +
+                       relevel(as.factor(diab_status) , ref = "2"),
+                     design = srs_design_srvyr_all_rec)
+
+summary(model_18c)
+
+tbl_merge_mod_18_1 <-
+  tbl_merge(
+    tbls = list(
+      tbl_regression(rev_model_2a, exponentiate = TRUE, include = c('relevel(as.factor(telomere_kb_quartile), ref = "4")')),
+      tbl_regression(model_17a, exponentiate = TRUE, include = c('relevel(as.factor(telomere_kb_quartile), ref = "4")')),
+      tbl_regression(model_18a, exponentiate = TRUE, include = c('relevel(as.factor(telomere_kb_quartile), ref = "4")'))),
+    tab_spanner = c("**unadj**", "**unadj2**", "**unadj3**"))
+
+tbl_merge_mod_18_1
+
+tbl_merge_mod_18_2 <-
+  tbl_merge(
+    tbls = list(
+      tbl_regression(rev_model_2b, exponentiate = TRUE, include = c('relevel(as.factor(telomere_kb_quartile), ref = "4")')),
+      tbl_regression(model_17b, exponentiate = TRUE, include = c('relevel(as.factor(telomere_kb_quartile), ref = "4")')),
+      tbl_regression(model_18b, exponentiate = TRUE, include = c('relevel(as.factor(telomere_kb_quartile), ref = "4")'))),
+    tab_spanner = c("**adj**", "**adj2**", "**adj3**"))
+
+tbl_merge_mod_18_2
+
+tbl_merge_mod_18_3 <-
+  tbl_merge(
+    tbls = list(
+      tbl_regression(rev_model_2c, exponentiate = TRUE, include = c('relevel(as.factor(telomere_kb_quartile), ref = "4")')),
+      tbl_regression(model_17c, exponentiate = TRUE, include = c('relevel(as.factor(telomere_kb_quartile), ref = "4")')),
+      tbl_regression(model_18c, exponentiate = TRUE, include = c('relevel(as.factor(telomere_kb_quartile), ref = "4")'))),
+    tab_spanner = c("**adj**", "**adj2**", "**adj3**"))
+
+tbl_merge_mod_18_3
+```
+
+```{r plot, echo=FALSE}
+#https://jinseob2kim.github.io/jskm/
+#https://jinseob2kim.github.io/jskm/reference/svyjskm.html
+
+#to visualize survival curve for all-cause mortality
+p4_all <- svykm(Surv(permth_int, mortstat == 1) ~ telomere_kb_quartile, design = srs_design_srvyr_all, se = T)
+svyjskm(p4_all, legendposition = c(0.85, 0.3),pval = T,  table = T)
+#plot(p4_all, lwd=2, pars=list(lty=c(1,2, 3, 4),col=c("purple","forestgreen", "orange", "grey")))
+
+p4_all_1 <- srs_design_srvyr_all %>% 
+  filter(age_grp == "1") %>% 
+  mutate(telomere_kb_quartile = factor(telomere_kb_quartile, 
+                                       levels = c("1", "2", "3", "4"),
+                                       labels = c("< 5.27", "5.27 - 5.63", "5.63 - 6.04", "> 6.04")))
+p4_all_1_p <- svykm(Surv(permth_int, mortstat == 1) ~ telomere_kb_quartile, design = p4_all_1, se = T)
+#plot(p4_all_1_p, lwd=2, pars=list(lty=c(1,2, 3, 4),col=c("purple","forestgreen", "orange", "grey")))
+svyjskm(p4_all_1_p, legendposition = c(0.85, 0.3),pval = T,  table = T)
+
+p4_all_2 <- srs_design_srvyr_all %>% 
+  filter(age_grp == "2") %>% 
+  mutate(telomere_kb_quartile = factor(telomere_kb_quartile, 
+                                       levels = c("1", "2", "3", "4"),
+                                       labels = c("< 5.27", "5.27 - 5.63", "5.63 - 6.04", "> 6.04")))
+p4_all_2_p <- svykm(Surv(permth_int, mortstat == 1) ~ telomere_kb_quartile, design = p4_all_2, se = T)
+svyjskm(p4_all_2_p, legendposition = c(0.85, 0.3),pval = T,  table = T)
+#plot(p4_all_2_p, lwd=2, pars=list(lty=c(1,2, 3, 4),col=c("purple","forestgreen", "orange", "grey")))
+
+p4_all_3 <- srs_design_srvyr_all %>% 
+  filter(age_grp == "3") %>% 
+  mutate(telomere_kb_quartile = factor(telomere_kb_quartile, 
+                                       levels = c("1", "2", "3", "4"),
+                                       labels = c("< 5.27", "5.27 - 5.63", "5.63 - 6.04", "> 6.04")))
+p4_all_3_p <- svykm(Surv(permth_int, mortstat == 1) ~ telomere_kb_quartile, design = p4_all_3, se = T)
+svyjskm(p4_all_3_p, legendposition = c(0.85, 0.8),pval = T,  table = T)
+#plot(p4_all_3_p, lwd=2, pars=list(lty=c(1,2, 3, 4),col=c("purple","forestgreen", "orange", "grey")))
+
+#to visualize survival curve for CVD-specific mortality
+p4_cvd<- svykm(Surv(permth_int, cvd_death== 1) ~ telomere_kb_quartile, design = srs_design_srvyr_all, se = T)
+svyjskm(p4_cvd, legendposition = c(0.85, 0.3),pval = T,  table = T )
+
+p4_cvd_1 <- srs_design_srvyr_all %>% 
+  filter(age_grp == "1") %>% 
+  mutate(telomere_kb_quartile = factor(telomere_kb_quartile, 
+                                       levels = c("1", "2", "3", "4"),
+                                       labels = c("< 5.27", "5.27 - 5.63", "5.63 - 6.04", "> 6.04")))
+p4_cvd_1_p <- svykm(Surv(permth_int, cvd_death == 1) ~ telomere_kb_quartile, design = p4_cvd_1, se = T)
+svyjskm(p4_cvd_1_p, legendposition = c(0.85, 0.3),pval = T,  table = T)
+
+p4_cvd_2 <- srs_design_srvyr_all %>% 
+  filter(age_grp == "2") %>% 
+  mutate(telomere_kb_quartile = factor(telomere_kb_quartile, 
+                                       levels = c("1", "2", "3", "4"),
+                                       labels = c("< 5.27", "5.27 - 5.63", "5.63 - 6.04", "> 6.04")))
+p4_cvd_2_p <- svykm(Surv(permth_int, cvd_death == 1) ~ telomere_kb_quartile, design = p4_cvd_2, se = T)
+svyjskm(p4_cvd_2_p, legendposition = c(0.85, 0.3),pval = T,  table = T)
+
+p4_cvd_3 <- srs_design_srvyr_all %>% 
+  filter(age_grp == "3") %>% 
+  mutate(telomere_kb_quartile = factor(telomere_kb_quartile, 
+                                       levels = c("1", "2", "3", "4"),
+                                       labels = c("< 5.27", "5.27 - 5.63", "5.63 - 6.04", "> 6.04")))
+p4_cvd_3_p <- svykm(Surv(permth_int, cvd_death == 1) ~ telomere_kb_quartile, design = p4_cvd_3, se = T)
+svyjskm(p4_cvd_3_p, legendposition = c(0.85, 0.3),pval = T,  table = T)
+
+#to visualize survival curve for cancer-specific mortality
+p4_cancer<- svykm(Surv(permth_int, cancer_death== 1) ~ telomere_kb_quartile, design = srs_design_srvyr_all, se = T)
+svyjskm(p4_cancer, legendposition = c(0.85, 0.3),pval = T,  table = T )
+
+p4_cancer_1 <- srs_design_srvyr_all %>% 
+  filter(age_grp == "1") %>% 
+  mutate(telomere_kb_quartile = factor(telomere_kb_quartile, 
+                                       levels = c("1", "2", "3", "4"),
+                                       labels = c("< 5.27", "5.27 - 5.63", "5.63 - 6.04", "> 6.04")))
+p4_cancer_1_p <- svykm(Surv(permth_int, cancer_death == 1) ~ telomere_kb_quartile, design = p4_cancer_1, se = T)
+#plot(p4_cancer_1_p, lwd=2, pars=list(lty=c(1,2, 3, 4),col=c("purple","forestgreen", "orange", "grey")))
+svyjskm(p4_cancer_1_p, legendposition = c(0.85, 0.3),pval = T,  table = T)
+
+p4_cancer_2 <- srs_design_srvyr_all %>% 
+  filter(age_grp == "2") %>% 
+  mutate(telomere_kb_quartile = factor(telomere_kb_quartile, 
+                                       levels = c("1", "2", "3", "4"),
+                                       labels = c("< 5.27", "5.27 - 5.63", "5.63 - 6.04", "> 6.04")))
+p4_cancer_2_p <- svykm(Surv(permth_int, cancer_death == 1) ~ telomere_kb_quartile, design = p4_cancer_2, se = T)
+svyjskm(p4_cancer_2_p, legendposition = c(0.85, 0.3),pval = T,  table = T)
+#plot(p4_cancer_2_p, lwd=2, pars=list(lty=c(1,2, 3, 4),col=c("purple","forestgreen", "orange", "grey")))
+
+p4_cancer_3 <- srs_design_srvyr_all %>% 
+  filter(age_grp == "3") %>% 
+  mutate(telomere_kb_quartile = factor(telomere_kb_quartile, 
+                                       levels = c("1", "2", "3", "4"),
+                                       labels = c("< 5.27", "5.27 - 5.63", "5.63 - 6.04", "> 6.04")))
+p4_cancer_3_p <- svykm(Surv(permth_int, cancer_death == 1) ~ telomere_kb_quartile, design = p4_cancer_3, se = T)
+svyjskm(p4_cancer_3_p, legendposition = c(0.85, 0.3),pval = T,  table = T)
+#plot(p4_cancer_3_p, lwd=2, pars=list(lty=c(1,2, 3, 4),col=c("purple","forestgreen", "orange", "grey")))
+
+#to plot graph for Hazard plots
+plot_data <- readxl::read_excel("summary_table 1_6_6_23.xlsx", sheet = "Plot Data")
+library(forestplot)
+
+plot_data |>
+  group_by(group) |>
+  forestplot(fn.ci_norm = c(fpDrawNormalCI, fpDrawCircleCI, fpDrawDiamondCI),
+             boxsize = .1, # We set the box size to better visualize the type
+             line.margin = .1, # We need to add this to avoid crowding
+             clip = c(-1, 6.5),
+             lty.ci = c(1, 3, 2),
+             xlab = "Hazard Ratio")|> 
+  fp_set_style(box = c("blue", "darkred", "green") |> 
+                 lapply(function(x) gpar(fill = x, col = "#555555")),
+               default = gpar(vertices = TRUE)) |> 
+  fp_set_zebra_style("#F5F9F9")
+
+#https://cran.r-project.org/web/packages/forestploter/vignettes/forestploter-intro.html
+library(grid)
+library(forestploter)
+
+# indent the `All-Cause Mortality` if there is a number in the sample column
+#plot_data$`All-Cause Mortality` <- ifelse(is.na(plot_data$Event), 
+ #                     plot_data$`All-Cause Mortality`,
+  #                    paste0("   ", plot_data$`All-Cause Mortality`))
+
+plot_data$`Telomere` <- ifelse(is.na(plot_data$Event), 
+                                            plot_data$`Telomere`,
+                                            paste0("   ", plot_data$`Telomere`))
+
+
+# NA to blank or NA will be transformed to carachter.
+plot_data$Event <- ifelse(is.na(plot_data$Event), "", plot_data$Event)
+plot_data$Sample <- ifelse(is.na(plot_data$Sample), "", plot_data$Sample)
+#plot_data$se <- (log(plot_data$upper) - log(plot_data$est))/1.96
+
+# Add blank column for the forest plot to display CI.
+# Adjust the column wiplot_datah with space, increase number of space below 
+# to have a larger area to draw the CI. 
+plot_data$` ` <- paste(rep(" ", 20), collapse = " ")
+
+# Create confidence interval column to display
+plot_data$`All-Cause HR (95% CI)` <- ifelse(is.na(plot_data$se), "",
+                           sprintf("%.2f (%.2f to %.2f)",
+                                   plot_data$est, plot_data$lower, plot_data$upper))
+
+plot_data$`CVD-Specific HR (95% CI)`<- ifelse(is.na(plot_data$se_cvd), "",
+                           sprintf("%.2f (%.2f to %.2f)",
+                                   plot_data$est_cvd, plot_data$lower_cvd, plot_data$upper_cvd))
+
+plot_data$`Cancer-Specific HR (95% CI)`<- ifelse(is.na(plot_data$se_cancer), "",
+                           sprintf("%.2f (%.2f to %.2f)",
+                                   plot_data$est_cancer, plot_data$lower_cancer, plot_data$upper_cancer))
+
+
+
+#plot_data$`CVD-Specific HR (95% CI)` <- paste(rep(" ", 20), collapse = " ")
+#plot_data$`Cancer-Specific HR (95% CI)` <- paste(rep(" ", 20), collapse = " ")
+
+tm <- forest_theme(base_size = 10,
+                   refline_col = "red",
+                   footnote_col = "#636363",
+                   footnote_fontface = "plain",
+                   footnote_cex = 1)
+
+p_all_cause <- forest(plot_data[,c(1, 18:19)],
+            est = plot_data$est,
+            lower = plot_data$lower, 
+            upper = plot_data$upper,
+            sizes = plot_data$se,
+            ci_column = 2,
+            ref_line = 1,
+           # arrow_lab = c("Protective", "Harmful"),
+            xlim = c(0, 6),
+            ticks_at = c(0, 1, 2, 3, 4, 5, 6),
+            footnote = "
+            
+    
+            
+
+            
+  Model 1- Crude
+  Model 2- Adjusted for age, sex, race/ethncity, education
+  Model 3- Adjusted for age, sex, race/ethncity, education, history of diabetes, 
+                cholesterol, hypertension, and cardiovascular disease",
+           theme = tm)
+
+
+# Print plot
+plot(p_all_cause)
+
+
+p_cvd <- forest(plot_data[,c(1, 18, 20)],
+            est = plot_data$est_cvd,
+            lower = plot_data$lower_cvd, 
+            upper = plot_data$upper_cvd,
+            sizes = plot_data$se_cvd,
+            ci_column = 2,
+            ref_line = 1,
+           # arrow_lab = c("Protective", "Harmful"),
+            xlim = c(0, 9),
+            ticks_at = c(0, 1, 2, 3, 4, 5, 6, 7, 8, 9),
+            footnote = "
+            
+            
+
+
+            
+  Model 1- Crude
+  Model 2- Adjusted for age, sex, race/ethncity, education
+  Model 3- Adjusted for age, sex, race/ethncity, education, history of diabetes, 
+                cholesterol, hypertension, and cardiovascular disease",
+           theme = tm)
+
+# Print plot
+plot(p_cvd)
+
+
+p_cancer <- forest(plot_data[,c(1, 18, 21)],
+                est = plot_data$est_cancer,
+                lower = plot_data$lower_cancer, 
+                upper = plot_data$upper_cancer,
+                sizes = plot_data$se_cancer,
+                ci_column = 2,
+                ref_line = 1,
+                # arrow_lab = c("Protective", "Harmful"),
+                xlim = c(0, 8),
+                ticks_at = c(0, 1, 2, 3, 4, 5, 6, 7, 8),
+                footnote = "
+            
+            
+
+            
+            
+  Model 1- Crude
+  Model 2- Adjusted for age, sex, race/ethncity, education
+  Model 3- Adjusted for age, sex, race/ethncity, education, history of diabetes, 
+                cholesterol, hypertension, and cardiovascular disease",
+                theme = tm)
+
+# Print plot
+plot(p_cancer)
+```
+
+```{r regression models with ref 4,echo=FALSE}
+#telomere continous model
+model_1a <-svycoxph(Surv(permth_int, mortstat == 1) ~ telomere_kb, 
+                   design = srs_design_srvyr_demo)
+
+summary(model_1a)
+
+
+model_1b <-svycoxph(Surv(permth_int, mortstat == 1) ~  telomere_kb +#   + # telomere_kb #  + #middle  
+                      relevel(as.factor(age_grp), ref = "1") +
+                      relevel(as.factor(RIAGENDR), ref = "1") + #male
+                      relevel(as.factor(RIDRETH2), ref = "1") + #white
+                      relevel(as.factor(edu_cat_3), ref = "1") + #less than high school
+                      relevel(as.factor(pir_cat) , ref = "1"), #poor
+                design = srs_design_srvyr_demo)
+
+summary(model_1b)
+
+
+model_1c <-svycoxph(Surv(permth_int, mortstat == 1) ~  telomere_kb +#   + #  # last quartile telomere length telomere_kb #  + #middle  
+                      relevel(as.factor(age_grp), ref = "1") +
+                      relevel(as.factor(RIAGENDR), ref = "1") + #male
+                      relevel(as.factor(RIDRETH2), ref = "1") + #white
+                      relevel(as.factor(edu_cat_3), ref = "1") + #less than high school
+                      relevel(as.factor(pir_cat) , ref = "1") + #poor
+                      relevel(as.factor(smoking_status), ref = "1") + #never
+                      relevel(as.factor(cvd_status) , ref = "2") +
+                      relevel(as.factor(htn_status) , ref = "2") +
+                      relevel(as.factor(chol_status) , ref = "2") +
+                      relevel(as.factor(diab_status) , ref = "2"),
+                design = srs_design_srvyr_demo)
+
+summary(model_1c)
+
+#tab_model(model_1c, terms = "telomere_kb")
+
+#tab_model(model_1a,model_1b,model_1c, terms = "telomere_kb")
+
+
+#telomere categorical model
+model_2a <-svycoxph(Surv(permth_int, mortstat == 1) ~ relevel(as.factor(telomere_kb_quartile), ref = "4"), 
+                   design = srs_design_srvyr_demo)
+
+summary(model_2a)
+
+model_2b <-svycoxph(Surv(permth_int, mortstat == 1) ~ relevel(as.factor(telomere_kb_quartile), ref = "4") +#   + #  # last quartile telomere length telomere_kb #  + #middle  
+                      relevel(as.factor(age_grp), ref = "1") + #young
+                      relevel(as.factor(RIAGENDR), ref = "1") + #male
+                      relevel(as.factor(RIDRETH2), ref = "1") + #white
+                      relevel(as.factor(edu_cat_3), ref = "1") + #less than high school
+                      relevel(as.factor(pir_cat) , ref = "1"),  #poor
+                design = srs_design_srvyr_demo)
+
+summary(model_2b)
+
+model_2c <-svycoxph(Surv(permth_int, mortstat == 1) ~ relevel(as.factor(telomere_kb_quartile), ref = "4") +#   + #  # last quartile telomere length telomere_kb #  + #middle  
+                      relevel(as.factor(age_grp), ref = "1") +
+                      relevel(as.factor(RIAGENDR), ref = "1") + #male
+                      relevel(as.factor(RIDRETH2), ref = "1") + #white
+                      relevel(as.factor(edu_cat_3), ref = "1") + #less than high school
+                      relevel(as.factor(pir_cat) , ref = "1") +  #poor
+                      relevel(as.factor(smoking_status), ref = "1") + #never
+                      relevel(as.factor(cvd_status) , ref = "2") +
+                      relevel(as.factor(htn_status) , ref = "2") +
+                      relevel(as.factor(chol_status) , ref = "2") +
+                      relevel(as.factor(diab_status) , ref = "2"),
+                design = srs_design_srvyr_demo)
+
+summary(model_2c)
+
+#tab_model(model_2a,model_2b,model_2c, terms = "telomere kb quartile")
+
+#telomere continous model
+model_3a <-svycoxph(Surv(permth_int, cvd_death == 1) ~ telomere_kb, 
+                   design = srs_design_srvyr_demo)
+
+summary(model_3a)
+
+model_3b <-svycoxph(Surv(permth_int, cvd_death == 1) ~  telomere_kb +#   + # telomere_kb #  + #middle  
+                      relevel(as.factor(age_grp), ref = "1") +
+                      relevel(as.factor(RIAGENDR), ref = "1") + #male
+                      relevel(as.factor(RIDRETH2), ref = "1") + #white
+                      relevel(as.factor(edu_cat_3), ref = "1") + #less than high school
+                      relevel(as.factor(pir_cat) , ref = "1"),  #poor
+                design = srs_design_srvyr_demo)
+
+summary(model_3b)
+
+model_3c <-svycoxph(Surv(permth_int, cvd_death == 1) ~  telomere_kb +#   + #  # last quartile telomere length telomere_kb #  + #middle  
+                      relevel(as.factor(age_grp), ref = "1") +
+                      relevel(as.factor(RIAGENDR), ref = "1") + #male
+                      relevel(as.factor(RIDRETH2), ref = "1") + #white
+                      relevel(as.factor(edu_cat_3), ref = "1") + #less than high school
+                      relevel(as.factor(pir_cat) , ref = "1") +  #poor
+                      relevel(as.factor(smoking_status), ref = "1") + #never
+                      relevel(as.factor(cvd_status) , ref = "2") +
+                      relevel(as.factor(htn_status) , ref = "2") +
+                      relevel(as.factor(chol_status) , ref = "2") +
+                      relevel(as.factor(diab_status) , ref = "2"),
+                design = srs_design_srvyr_demo)
+
+summary(model_3c)
+
+#tab_model(model_3a, model_3b, model_3c, terms = "telomere_kb")
+
+#telomere categorical model
+model_4a <-svycoxph(Surv(permth_int, cvd_death == 1) ~ relevel(as.factor(telomere_kb_quartile), ref = "4"), 
+                   design = srs_design_srvyr_demo)
+
+summary(model_4a)
+
+model_4b <-svycoxph(Surv(permth_int, cvd_death == 1) ~ relevel(as.factor(telomere_kb_quartile), ref = "4") +#   + #  # last quartile telomere length telomere_kb #  + #middle  
+                      relevel(as.factor(age_grp), ref = "1") +
+                      relevel(as.factor(RIAGENDR), ref = "1") + #male
+                      relevel(as.factor(RIDRETH2), ref = "1") + #white
+                      relevel(as.factor(edu_cat_3), ref = "1") + #less than high school
+                      relevel(as.factor(pir_cat) , ref = "1"),  #poor
+                design = srs_design_srvyr_demo)
+
+summary(model_4b)
+
+model_4c <-svycoxph(Surv(permth_int, cvd_death == 1) ~ relevel(as.factor(telomere_kb_quartile), ref = "4") +#   + #  # last quartile telomere length telomere_kb #  + #middle  
+                      relevel(as.factor(age_grp), ref = "1") +
+                      relevel(as.factor(RIAGENDR), ref = "1") + #male
+                      relevel(as.factor(RIDRETH2), ref = "1") + #white
+                      relevel(as.factor(edu_cat_3), ref = "1") + #less than high school
+                      relevel(as.factor(pir_cat) , ref = "1") +  #poor
+                      relevel(as.factor(smoking_status), ref = "1") + #never
+                      relevel(as.factor(cvd_status) , ref = "2") +
+                      relevel(as.factor(htn_status) , ref = "2") +
+                      relevel(as.factor(chol_status) , ref = "2") +
+                      relevel(as.factor(diab_status) , ref = "2"),
+                design = srs_design_srvyr_demo)
+
+summary(model_4c)
+
+#telomere continous model
+model_5a <-svycoxph(Surv(permth_int, cancer_death== 1) ~ telomere_kb, 
+                   design = srs_design_srvyr_demo)
+
+summary(model_5a)
+
+model_5b <-svycoxph(Surv(permth_int, cancer_death== 1) ~  telomere_kb +#   + # telomere_kb #  + #middle  
+                      relevel(as.factor(age_grp), ref = "1") +
+                      relevel(as.factor(RIAGENDR), ref = "1") + #male
+                      relevel(as.factor(RIDRETH2), ref = "1") + #white
+                      relevel(as.factor(edu_cat_3), ref = "1") + #less than high school
+                      relevel(as.factor(pir_cat) , ref = "1"),  #poor
+                design = srs_design_srvyr_demo)
+
+summary(model_5b)
+
+model_5c <-svycoxph(Surv(permth_int, cancer_death== 1) ~  telomere_kb +#   + #  # last quartile telomere length telomere_kb #  + #middle  
+                      relevel(as.factor(age_grp), ref = "1") +
+                      relevel(as.factor(RIAGENDR), ref = "1") + #male
+                      relevel(as.factor(RIDRETH2), ref = "1") + #white
+                      relevel(as.factor(edu_cat_3), ref = "1") + #less than high school
+                      relevel(as.factor(pir_cat) , ref = "1") + #poor
+                      relevel(as.factor(smoking_status), ref = "1") + #never
+                      relevel(as.factor(cvd_status) , ref = "2") +
+                      relevel(as.factor(htn_status) , ref = "2") +
+                      relevel(as.factor(chol_status) , ref = "2") +
+                      relevel(as.factor(diab_status) , ref = "2"),
+                design = srs_design_srvyr_demo)
+
+summary(model_5c)
+
+#tab_model(model_5a, model_5b, model_5c)
+#telomere categorical model
+model_6a <-svycoxph(Surv(permth_int, cancer_death== 1) ~ relevel(as.factor(telomere_kb_quartile), ref = "4"), 
+                   design = srs_design_srvyr_demo)
+
+summary(model_6a)
+
+model_6b <-svycoxph(Surv(permth_int, cancer_death== 1) ~ relevel(as.factor(telomere_kb_quartile), ref = "4") +#   + #  # last quartile telomere length telomere_kb #  + #middle  
+                      relevel(as.factor(age_grp), ref = "1") +
+                      relevel(as.factor(RIAGENDR), ref = "1") + #male
+                      relevel(as.factor(RIDRETH2), ref = "1") + #white
+                      relevel(as.factor(edu_cat_3), ref = "1") + #less than high school
+                      relevel(as.factor(pir_cat) , ref = "1"),  #poor
+                design = srs_design_srvyr_demo)
+
+summary(model_6b)
+
+model_6c <-svycoxph(Surv(permth_int, cancer_death== 1) ~ relevel(as.factor(telomere_kb_quartile), ref = "4") +#   + #  # last quartile telomere length telomere_kb #  + #middle  
+                      relevel(as.factor(age_grp), ref = "1") +
+                      relevel(as.factor(RIAGENDR), ref = "1") + #male
+                      relevel(as.factor(RIDRETH2), ref = "1") + #white
+                      relevel(as.factor(edu_cat_3), ref = "1") + #less than high school
+                      relevel(as.factor(pir_cat) , ref = "1") + #poor
+                      relevel(as.factor(smoking_status), ref = "1") + #never
+                      relevel(as.factor(cvd_status) , ref = "2") +
+                      relevel(as.factor(htn_status) , ref = "2") +
+                      relevel(as.factor(chol_status) , ref = "2") +
+                      relevel(as.factor(diab_status) , ref = "2"),
+                design = srs_design_srvyr_demo)
+
+summary(model_6c)
+
+#sjPlot::tab_model(model_6c)
+
+#tab_model(model_5a, model_5b, model_5c)
+
+#tab_model(model_6a, model_6b, model_6c)
+
+#https://cran.r-project.org/web/packages/forestplot/vignettes/forestplot.html#multiple-confidence-bands
+#https://cran.r-project.org/web/packages/casebase/vignettes/plotsmoothHazard.html
+```
+
+
+## List numerically coded categorical variables
+factorVars <- c("telomere_quartile", "telomere_kb_quartile","age_grp", "RIAGENDR", "RIDRETH2", "edu_cat_3", "pir_cat", "smoking_status", "htn_status", "cvd_status", "diab_status", "chol_status", "mortstat", "ucod_leading", "diabetes", "hyperten", "eligstat", "cvd_death", "cancer_death")
+
+## Create a variable list. Use dput(names(pbc))
+vars <- c("RIDAGEYR", "TELOMEAN", "telomere_kb", "permth_int", "permth_exm")
+
+
+## Create Table 1 stratified by trt (omit strata argument for overall table)
+tableOne <- CreateTableOne(vars = vars, strata = "mortstat", data = analysis_data_2, factorVars = factorVars)
+## Just typing the object name will invoke the print.TableOne method
+## Tests are by oneway.test/t.test for continuous, chisq.test for categorical
+tableOne
